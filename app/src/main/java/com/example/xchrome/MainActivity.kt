@@ -39,10 +39,19 @@ class MainActivity : AppCompatActivity() {
                 pref.edit().putBoolean("auto_open_download", isChecked).apply()
             }
         }
+
+        val switchOverwrite = SwitchMaterial(this).apply {
+            text = getString(R.string.overwrite_download)
+            isChecked = pref.getBoolean("overwrite_download", false)
+            setOnCheckedChangeListener { _, isChecked ->
+                pref.edit().putBoolean("overwrite_download", isChecked).apply()
+            }
+        }
         
         root.addView(title)
         root.addView(switchJump)
         root.addView(switchDownload)
+        root.addView(switchOverwrite)
         
         setContentView(root)
     }

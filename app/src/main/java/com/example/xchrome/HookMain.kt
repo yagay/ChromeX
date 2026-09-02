@@ -127,6 +127,60 @@ class HookMain : IXposedHookLoadPackage {
         } catch (e: Throwable) {
             XposedBridge.log("xChrome: Hook 下载逻辑失败 (可能 Chrome 版本不兼容) - ${e.message}")
         }
+
+        // 新增：Hook 同名文件直接覆盖
+        try {
+            val downloadDialogBridgeClass = XposedHelpers.findClass(
+                "org.chromium.chrome.browser.download.DownloadDialogBridge",
+                lpparam.classLoader
+            )
+
+            XposedHelpers.findAndHookMethod(
+                downloadDialogBridgeClass,
+                "showDialog",
+                "org.chromium.ui.base.WindowAndroid",
+                Long::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        prefs.reload()
+                        if (!prefs.getBoolean("overwrite_download", false)) return
+
+                        val dialogType = param.args[2] as Int
+                        val suggestedPath = param.args[3] as String
+
+                        // dialogType 4: NAME_CONFLICT, 6: DUPLICATE_FILE (视 Chrome 版本而定)
+                        if (dialogType == 4 || dialogType == 6) {
+                            XposedBridge.log("xChrome: 检测到文件冲突 (type=$dialogType): $suggestedPath")
+                            
+                            val file = File(suggestedPath)
+                            if (file.exists()) {
+                                if (file.delete()) {
+                                    XposedBridge.log("xChrome: 已删除既存文件，准备覆盖")
+                                }
+                            }
+
+                            try {
+                                val nativePtr = try {
+                                    XposedHelpers.getLongField(param.thisObject, "mNativeDownloadDialogBridge")
+                                } catch (e: Throwable) {
+                                    XposedHelpers.getLongField(param.thisObject, "mNativeDownloadLocationDialogBridge")
+                                }
+                                
+                                XposedHelpers.callMethod(param.thisObject, "nativeOnComplete", nativePtr, suggestedPath)
+                                param.result = null
+                                XposedBridge.log("xChrome: 已跳过对话框并触发下载")
+                            } catch (e: Throwable) {
+                                XposedBridge.log("xChrome: 触发覆盖下载失败 - ${e.message}")
+                            }
+                        }
+                    }
+                }
+            )
+        } catch (e: Throwable) {
+            XposedBridge.log("xChrome: Hook DownloadDialogBridge 失败 - ${e.message}")
+        }
     }
 
     private fun openFile(context: Context, filePath: String) {
