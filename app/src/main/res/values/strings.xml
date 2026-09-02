@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">xChrome</string>
+    <string name="settings_title">xChrome 设置</string>
+    <string name="enable_hook">禁用跳转到其他应用</string>
+    <string name="enable_auto_open">下载完成后自动打开</string>
+</resources>
