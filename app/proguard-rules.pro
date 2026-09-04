@@ -1,0 +1,3 @@
+-keep class com.yagay.chromex.ModuleMain { *; }
+-keep class com.yagay.chromex.ChromeXApp { *; }
+-dontwarn io.github.libxposed.**
