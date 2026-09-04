@@ -1,25 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
     <application
-        android:allowBackup="true"
-        android:label="@string/app_name"
+        android:name=".ChromeXApp"
+        android:allowBackup="false"
+        android:label="ChromeX"
         android:supportsRtl="true"
-        android:theme="@style/Theme.XChrome">
-
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="禁用/启用 Chrome 浏览器跳转到其他 App" />
-        <meta-data
-            android:name="xposedapi"
-            android:value="102" />
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@xml/xposed_scope" />
-
+        android:theme="@style/Theme.ChromeX">
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -29,5 +15,4 @@
             </intent-filter>
         </activity>
     </application>
-
 </manifest>
