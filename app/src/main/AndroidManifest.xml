@@ -10,6 +10,12 @@
         android:label="ChromeX"
         android:supportsRtl="true"
         android:theme="@style/Theme.ChromeX">
+        <provider
+            android:name=".DiagnosticProvider"
+            android:authorities="com.yagay.chromex.diagnostics"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
