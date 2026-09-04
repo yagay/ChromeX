@@ -46,8 +46,19 @@ final class TabHooks {
     }
 
     private void installNoRestoreSwitch() {
+        // Current Chromium keeps this API stable. Prefer it over a release-specific R8 class.
+        hooks.exact(loader, "org.chromium.base.CommandLine", "hasSwitch",
+                new Class<?>[]{String.class}, "chromex:tabs:no-restore:stable", chain -> {
+                    if (Config.get(prefs, Config.CLEAN_START)
+                            && "no-restore-state".equals(chain.getArg(0))) {
+                        return Boolean.TRUE;
+                    }
+                    return chain.proceed();
+                });
+
+        // Chrome 145 fallback.
         hooks.exact(loader, Chrome145.COMMAND_FLAGS, "c", new Class<?>[]{String.class},
-                "chromex:tabs:no-restore", chain -> {
+                "chromex:tabs:no-restore:145", chain -> {
                     if (Config.get(prefs, Config.CLEAN_START)
                             && "no-restore-state".equals(chain.getArg(0))) {
                         return Boolean.TRUE;
@@ -115,7 +126,43 @@ final class TabHooks {
     }
 
     private void installNewTabRedirect() {
-        hooks.all(loader, Chrome145.TAB_CREATOR, "l", "chromex:tabs:creator", chain -> {
+        // Current Chromium path. ChromeTabCreator is a stable Java class and LoadUrlParams exposes
+        // getUrl()/setUrl(), so this survives R8 changes to short class and field names.
+        hooks.all(loader, Chrome145.CHROME_TAB_CREATOR, "createNewTab",
+                "chromex:tabs:createNewTab", chain -> {
+                    if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
+                        return chain.proceed();
+                    }
+                    Object params = chain.getArg(0);
+                    if (params == null) return chain.proceed();
+                    try {
+                        Object raw = Reflect.call(params, "getUrl");
+                        if (raw instanceof String && isNtp((String) raw)) {
+                            String home = resolveHomeUrl();
+                            if (!isNtp(home)) Reflect.call(params, "setUrl", home);
+                        }
+                    } catch (Throwable t) {
+                        hooks.warn("stable createNewTab redirect skipped: " + t.getClass().getSimpleName());
+                    }
+                    return chain.proceed();
+                });
+
+        hooks.all(loader, Chrome145.CHROME_TAB_CREATOR, "launchUrl",
+                "chromex:tabs:launchUrl", chain -> {
+                    if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
+                        return chain.proceed();
+                    }
+                    Object first = chain.getArg(0);
+                    if (!(first instanceof String) || !isNtp((String) first)) return chain.proceed();
+                    String home = resolveHomeUrl();
+                    if (isNtp(home)) return chain.proceed();
+                    Object[] args = chain.getArgs().toArray();
+                    args[0] = home;
+                    return chain.proceed(args);
+                });
+
+        // Chrome 145 R8 fallback.
+        hooks.all(loader, Chrome145.TAB_CREATOR, "l", "chromex:tabs:creator:145", chain -> {
             if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
                 return chain.proceed();
             }
@@ -131,6 +178,8 @@ final class TabHooks {
             return chain.proceed();
         });
 
+        // JNI bridge fallback. It is also useful on versions where tab creation bypasses
+        // ChromeTabCreator for a particular launch source.
         hooks.all(loader, Chrome145.TAB_MODEL, "openNewTab", "chromex:tabs:openNewTab", chain -> {
             if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().size() < 2) {
                 return chain.proceed();
@@ -220,6 +269,25 @@ final class TabHooks {
     }
 
     private Object findRegularModel(Activity activity) {
+        // Prefer the stable TabModelSelector type when it is directly retained by the activity.
+        try {
+            Class<?> selectorType = Reflect.cls(loader,
+                    "org.chromium.chrome.browser.tabmodel.TabModelSelector");
+            Object selector = Reflect.findFieldValueByType(activity, selectorType);
+            if (selector != null) {
+                for (String method : new String[]{"getModel", "getTabModel"}) {
+                    try {
+                        Object model = Reflect.call(selector, method, Boolean.FALSE);
+                        if (model != null) {
+                            remember(model);
+                            return model;
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // Chrome 145 selector fallback.
         try {
             Class<?> selectorType = Reflect.cls(loader, Chrome145.SELECTOR);
             Object selector = Reflect.findFieldValueByType(activity, selectorType);
@@ -233,6 +301,7 @@ final class TabHooks {
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
+
         for (Object model : knownModels()) {
             if (!incognito(model)) return model;
         }
@@ -240,6 +309,18 @@ final class TabHooks {
     }
 
     private String resolveHomeUrl() {
+        // Stable current Chromium API.
+        try {
+            Class<?> manager = Reflect.cls(loader, Chrome145.HOMEPAGE_MANAGER);
+            Object instance = Reflect.callStatic(manager, "getInstance");
+            if (instance != null) {
+                Object gurl = Reflect.call(instance, "getHomepageGurl", Boolean.FALSE);
+                String value = gurlText(gurl);
+                if (value != null && !value.isBlank()) return value;
+            }
+        } catch (Throwable ignored) {}
+
+        // Chrome 145 R8 fallback.
         try {
             Class<?> manager = Reflect.cls(loader, Chrome145.HOMEPAGE);
             Object instance = Reflect.callStatic(manager, "d");
@@ -254,6 +335,10 @@ final class TabHooks {
 
     private String gurlText(Object gurl) {
         if (gurl == null) return null;
+        try {
+            Object value = Reflect.call(gurl, "getSpec");
+            if (value instanceof String) return (String) value;
+        } catch (Throwable ignored) {}
         try {
             Object value = Reflect.call(gurl, "j");
             if (value instanceof String) return (String) value;
@@ -296,7 +381,7 @@ final class TabHooks {
                 return method.invoke(model, gurl, 2);
             }
         } catch (Throwable t) {
-            hooks.error("open home tab", t);
+            hooks.warn("open home tab fallback unavailable: " + t.getClass().getSimpleName());
         }
         return null;
     }
@@ -359,6 +444,28 @@ final class TabHooks {
     }
 
     private void closeAllKnownTabs(Activity activity) {
+        // Current TabModel API provides closeAllTabs(boolean allowDelegation, boolean uponExit).
+        for (Object model : knownModels()) {
+            boolean closed = false;
+            try {
+                Reflect.call(model, "closeAllTabs", Boolean.FALSE, Boolean.TRUE);
+                closed = true;
+            } catch (Throwable ignored) {}
+            if (!closed) {
+                try {
+                    Reflect.call(model, "closeAllTabs");
+                    closed = true;
+                } catch (Throwable ignored) {}
+            }
+            if (!closed) {
+                for (int i = count(model) - 1; i >= 0; i--) {
+                    Object tab = tabAt(model, i);
+                    if (tab != null) closeTab(model, tab);
+                }
+            }
+        }
+
+        // Chrome 145 R8 fallback, useful when no model has been captured yet.
         try {
             Class<?> selectorType = Reflect.cls(loader, Chrome145.SELECTOR);
             Object selector = Reflect.findFieldValueByType(activity, selectorType);
@@ -370,15 +477,15 @@ final class TabHooks {
                 if (runnable instanceof Runnable) ((Runnable) runnable).run();
             }
         } catch (Throwable ignored) {}
-        for (Object model : knownModels()) {
-            for (int i = count(model) - 1; i >= 0; i--) {
-                Object tab = tabAt(model, i);
-                if (tab != null) closeTab(model, tab);
-            }
-        }
     }
 
     private void closeTab(Object model, Object tab) {
+        // Current Chromium: closeTab(Tab, boolean animate, boolean uponExit, boolean canUndo).
+        try {
+            Reflect.call(model, "closeTab", tab, Boolean.FALSE, Boolean.FALSE, Boolean.FALSE);
+            return;
+        } catch (Throwable ignored) {}
+
         try {
             try {
                 Method exact = Reflect.exact(model.getClass(), "closeTab", tab.getClass());
@@ -413,9 +520,15 @@ final class TabHooks {
     }
 
     private void clearClosedHistory() {
+        // Legacy native path. Kept isolated so failure here never breaks tab closing.
         try {
             Class<?> pm = Reflect.cls(loader, Chrome145.PROFILE_MANAGER);
-            Object profile = Reflect.exact(pm, "b").invoke(null);
+            Object profile;
+            try {
+                profile = Reflect.callStatic(pm, "getLastUsedRegularProfile");
+            } catch (Throwable ignored) {
+                profile = Reflect.exact(pm, "b").invoke(null);
+            }
             if (profile == null) return;
             Class<?> nativeClass = Reflect.cls(loader, Chrome145.NATIVE);
             Method method = Reflect.exact(nativeClass, "VIOOOOOOO",
@@ -424,7 +537,8 @@ final class TabHooks {
             method.invoke(null, 0, 4, profile, null,
                     new int[]{8}, new String[0], new int[0], new String[0], new int[0]);
         } catch (Throwable t) {
-            hooks.error("clear closed-tab history", t);
+            hooks.warn("clear closed-tab history legacy path unavailable: "
+                    + t.getClass().getSimpleName());
         }
     }
 }
