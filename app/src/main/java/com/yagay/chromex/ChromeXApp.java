@@ -1,6 +1,7 @@
 package com.yagay.chromex;
 
 import android.app.Application;
+import android.content.Intent;
 
 import java.util.concurrent.CopyOnWriteArraySet;
 
@@ -31,6 +32,10 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
     @Override
     public void onCreate() {
         super.onCreate();
+        try {
+            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.URI,
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        } catch (Throwable ignored) {}
         XposedServiceHelper.registerListener(this);
     }
 
