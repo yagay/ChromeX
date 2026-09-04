@@ -30,7 +30,7 @@ public final class ModuleMain extends XposedModule {
         new InstallerHooks(this, hooks, prefs, loader).install();
         new BannerHooks(this, hooks, prefs, loader).install();
 
-        log(Log.INFO, "ChromeX", "Chrome 145 feature hooks installed");
+        log(Log.INFO, "ChromeX", "adaptive Chrome hooks installed; legacy Chrome 145 fallbacks enabled");
     }
 
     @Override
