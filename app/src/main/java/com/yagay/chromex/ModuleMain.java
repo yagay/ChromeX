@@ -8,10 +8,12 @@ import io.github.libxposed.api.XposedModule;
 public final class ModuleMain extends XposedModule {
     private SharedPreferences prefs;
     private HookSupport hooks;
+    private String processName = "unknown";
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
-        log(Log.INFO, "ChromeX", "module loaded in " + param.getProcessName()
+        processName = param.getProcessName();
+        log(Log.INFO, "ChromeX", "module loaded in " + processName
                 + ", framework=" + getFrameworkName() + " " + getFrameworkVersion()
                 + ", api=" + getApiVersion());
     }
@@ -23,14 +25,17 @@ public final class ModuleMain extends XposedModule {
 
         ClassLoader loader = param.getClassLoader();
         prefs = Config.fromModule(this);
-        hooks = new HookSupport(this);
+        Diagnostics.beginSession(prefs, processName, getApiVersion(),
+                getFrameworkName(), getFrameworkVersion());
+        hooks = new HookSupport(this, prefs);
 
         new TabHooks(this, hooks, prefs, loader).install();
         new DownloadDialogHooks(this, hooks, prefs, loader).install();
         new InstallerHooks(this, hooks, prefs, loader).install();
         new BannerHooks(this, hooks, prefs, loader).install();
 
-        log(Log.INFO, "ChromeX", "adaptive Chrome hooks installed; legacy Chrome 145 fallbacks enabled");
+        Diagnostics.scheduleScan(prefs, loader);
+        hooks.info("adaptive Chrome hooks installed; automatic locator scheduled");
     }
 
     @Override
