@@ -90,12 +90,13 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         while (content.getChildCount() > 3) content.removeViewAt(3);
         if (service == null) {
             prefs = null;
-            status.setText("LSPosed 服务未连接。仍可导出系统日志，但模块内部诊断数据可能为空。\n");
+            status.setText("LSPosed 服务未连接。仍可导出本地诊断数据，但模块设置不可修改。\n");
             addDiagnosticsSection();
             return;
         }
         prefs = Config.fromService(service);
-        status.setText("已连接 · API " + service.getApiVersion() + " · 作用域 " + service.getScope() + "\n");
+        status.setText("已连接 · API " + service.getApiVersion()
+                + " · 作用域 " + service.getScope() + "\n");
         for (String[] item : ITEMS) addSwitch(item[0], item[1]);
         addDiagnosticsSection();
     }
@@ -123,11 +124,22 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(heading);
 
         TextView help = new TextView(this);
-        help.setText("自动扫描稳定类、方法签名和新版 R8 候选，并记录每个 Hook 是否安装成功、是否实际命中。\n"
+        help.setText("诊断数据通过独立 IPC 从 Chrome 写回 ChromeX，本身失败不会影响功能 Hook。\n"
+                + "自动扫描稳定类、方法签名和新版 R8 候选，并记录 Hook 安装和实际命中。\n"
                 + "最后扫描: " + lastScanText());
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(8));
         content.addView(help);
+
+        TextView root = new TextView(this);
+        root.setText("Root：检测中…");
+        root.setTextSize(13f);
+        root.setPadding(0, 0, 0, dp(8));
+        content.addView(root);
+        new Thread(() -> {
+            String value = DiagnosticExporter.rootStatus();
+            runOnUiThread(() -> root.setText(value));
+        }, "ChromeX-root-probe").start();
 
         Switch diagnostic = new Switch(this);
         diagnostic.setText("诊断模式（推荐保持开启）");
@@ -145,15 +157,15 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         scan.setOnClickListener(v -> {
             if (prefs != null) prefs.edit().putBoolean(Config.DIAGNOSTIC_MODE, true).apply();
             scan.setEnabled(false);
-            Toast.makeText(this, "正在重启 Chrome 触发新一轮自动定位…", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "正在重新启动 Chrome 并触发自动定位…", Toast.LENGTH_SHORT).show();
             new Thread(() -> {
                 boolean restarted = DiagnosticExporter.restartChrome(this);
                 runOnUiThread(() -> {
                     scan.setEnabled(true);
                     Toast.makeText(this,
                             restarted
-                                    ? "Chrome 已重新启动。进入 Chrome 操作一次失效功能后再导出。"
-                                    : "未能通过 Root 重启 Chrome，请手动强制结束 Chrome 后重新打开。",
+                                    ? "Chrome 已重新启动。请触发失效功能，约 3 秒后即可导出。"
+                                    : "ChromeX 没有可用 Root。请手动强制结束 Chrome 后重新打开。",
                             Toast.LENGTH_LONG).show();
                 });
             }, "ChromeX-rescan").start();
@@ -170,8 +182,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
                 DiagnosticExporter.Result result = DiagnosticExporter.export(this, prefs);
                 runOnUiThread(() -> {
                     export.setEnabled(true);
-                    Toast.makeText(this, result.message,
-                            result.success ? Toast.LENGTH_LONG : Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 });
             }, "ChromeX-export").start();
         });
@@ -179,8 +190,9 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView path = new TextView(this);
         path.setText("导出位置：Download/ChromeX/ChromeX-diagnostic-时间.zip\n"
-                + "ZIP 会包含 hook_points、hook_install、hook_hits、模块事件、设备/Chrome 版本、"
-                + "过滤后的 logcat 和 LSPosed 日志。Root 可用时收集内容最完整。");
+                + "ZIP 包含 hook_points、hook_install、hook_hits、模块事件、设备/Chrome 版本、"
+                + "Root 状态、过滤后的 logcat 和 LSPosed 日志。\n"
+                + "即使没有 Root，核心 Hook/扫描诊断数据也应能正常导出。");
         path.setTextSize(13f);
         path.setPadding(0, dp(8), 0, dp(16));
         content.addView(path);
@@ -194,10 +206,10 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
     }
 
     private String lastScanText() {
-        if (prefs == null) return "暂无";
         try {
-            long value = prefs.getLong(Diagnostics.KEY_LAST_SCAN, 0L);
-            if (value <= 0L) return "暂无；请重启 Chrome";
+            SharedPreferences diagnosticPrefs = DiagnosticProvider.store(this);
+            long value = diagnosticPrefs.getLong(Diagnostics.KEY_LAST_SCAN, 0L);
+            if (value <= 0L) return "暂无；请重新启动 Chrome";
             return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     .format(new Date(value));
         } catch (Throwable ignored) {
