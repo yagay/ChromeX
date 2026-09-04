@@ -6,10 +6,16 @@ import android.content.pm.PackageInfo;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 import io.github.libxposed.service.XposedService;
 
@@ -84,12 +90,14 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         while (content.getChildCount() > 3) content.removeViewAt(3);
         if (service == null) {
             prefs = null;
-            status.setText("LSPosed 服务未连接。请确认模块已启用。\n");
+            status.setText("LSPosed 服务未连接。仍可导出系统日志，但模块内部诊断数据可能为空。\n");
+            addDiagnosticsSection();
             return;
         }
         prefs = Config.fromService(service);
         status.setText("已连接 · API " + service.getApiVersion() + " · 作用域 " + service.getScope() + "\n");
         for (String[] item : ITEMS) addSwitch(item[0], item[1]);
+        addDiagnosticsSection();
     }
 
     private void addSwitch(String key, String label) {
@@ -104,6 +112,97 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         });
         content.addView(sw, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void addDiagnosticsSection() {
+        TextView heading = new TextView(this);
+        heading.setText("诊断与 Hook 定位");
+        heading.setTextSize(20f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setPadding(0, dp(20), 0, dp(4));
+        content.addView(heading);
+
+        TextView help = new TextView(this);
+        help.setText("自动扫描稳定类、方法签名和新版 R8 候选，并记录每个 Hook 是否安装成功、是否实际命中。\n"
+                + "最后扫描: " + lastScanText());
+        help.setTextSize(14f);
+        help.setPadding(0, 0, 0, dp(8));
+        content.addView(help);
+
+        Switch diagnostic = new Switch(this);
+        diagnostic.setText("诊断模式（推荐保持开启）");
+        diagnostic.setTextSize(16f);
+        diagnostic.setChecked(Config.get(prefs, Config.DIAGNOSTIC_MODE));
+        diagnostic.setPadding(0, dp(6), 0, dp(6));
+        diagnostic.setOnCheckedChangeListener((button, checked) -> {
+            if (prefs != null) prefs.edit().putBoolean(Config.DIAGNOSTIC_MODE, checked).apply();
+        });
+        content.addView(diagnostic, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button scan = new Button(this);
+        scan.setText("重新定位 Hook 点");
+        scan.setOnClickListener(v -> {
+            if (prefs != null) prefs.edit().putBoolean(Config.DIAGNOSTIC_MODE, true).apply();
+            scan.setEnabled(false);
+            Toast.makeText(this, "正在重启 Chrome 触发新一轮自动定位…", Toast.LENGTH_SHORT).show();
+            new Thread(() -> {
+                boolean restarted = DiagnosticExporter.restartChrome(this);
+                runOnUiThread(() -> {
+                    scan.setEnabled(true);
+                    Toast.makeText(this,
+                            restarted
+                                    ? "Chrome 已重新启动。进入 Chrome 操作一次失效功能后再导出。"
+                                    : "未能通过 Root 重启 Chrome，请手动强制结束 Chrome 后重新打开。",
+                            Toast.LENGTH_LONG).show();
+                });
+            }, "ChromeX-rescan").start();
+        });
+        content.addView(scan, buttonParams());
+
+        Button export = new Button(this);
+        export.setText("一键导出诊断包");
+        export.setOnClickListener(v -> {
+            export.setEnabled(false);
+            Toast.makeText(this, "正在收集 ChromeX / Chrome / LSPosed 相关日志…",
+                    Toast.LENGTH_SHORT).show();
+            new Thread(() -> {
+                DiagnosticExporter.Result result = DiagnosticExporter.export(this, prefs);
+                runOnUiThread(() -> {
+                    export.setEnabled(true);
+                    Toast.makeText(this, result.message,
+                            result.success ? Toast.LENGTH_LONG : Toast.LENGTH_LONG).show();
+                });
+            }, "ChromeX-export").start();
+        });
+        content.addView(export, buttonParams());
+
+        TextView path = new TextView(this);
+        path.setText("导出位置：Download/ChromeX/ChromeX-diagnostic-时间.zip\n"
+                + "ZIP 会包含 hook_points、hook_install、hook_hits、模块事件、设备/Chrome 版本、"
+                + "过滤后的 logcat 和 LSPosed 日志。Root 可用时收集内容最完整。");
+        path.setTextSize(13f);
+        path.setPadding(0, dp(8), 0, dp(16));
+        content.addView(path);
+    }
+
+    private LinearLayout.LayoutParams buttonParams() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.topMargin = dp(6);
+        return p;
+    }
+
+    private String lastScanText() {
+        if (prefs == null) return "暂无";
+        try {
+            long value = prefs.getLong(Diagnostics.KEY_LAST_SCAN, 0L);
+            if (value <= 0L) return "暂无；请重启 Chrome";
+            return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+                    .format(new Date(value));
+        } catch (Throwable ignored) {
+            return "读取失败";
+        }
     }
 
     private String installedChromeVersion() {
