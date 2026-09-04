@@ -1,10 +1,12 @@
 package com.yagay.chromex;
 
 import android.app.Application;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Build;
+import android.util.Log;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -22,6 +24,13 @@ import java.util.Set;
 import java.util.TimeZone;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Diagnostics running inside Chrome.
+ *
+ * Important: XposedModule#getRemotePreferences() is read-only in hooked apps. This class only
+ * reads feature/diagnostic settings from RemotePreferences and sends diagnostic output to
+ * DiagnosticProvider, which stores it under the ChromeX app UID.
+ */
 final class Diagnostics {
     static final String KEY_SESSION = "_diag_session";
     static final String KEY_SCAN_REPORT = "_diag_scan_report";
@@ -38,154 +47,243 @@ final class Diagnostics {
     private static final Map<String, Long> LAST_HIT = new ConcurrentHashMap<>();
     private static final List<String> EVENTS = new ArrayList<>();
     private static volatile long lastHitFlush;
+    private static volatile boolean providerFailureLogged;
 
     private Diagnostics() {}
 
     static void beginSession(SharedPreferences prefs, String process, int api,
                              String framework, String frameworkVersion) {
-        if (prefs == null) return;
-        synchronized (LOCK) {
-            HITS.clear();
-            LAST_HIT.clear();
-            EVENTS.clear();
-            lastHitFlush = 0L;
+        if (!enabled(prefs)) return;
+        try {
+            synchronized (LOCK) {
+                HITS.clear();
+                LAST_HIT.clear();
+                EVENTS.clear();
+                lastHitFlush = 0L;
+            }
             String session = "time=" + now() + "\n"
                     + "process=" + process + "\n"
                     + "api=" + api + "\n"
                     + "framework=" + framework + " " + frameworkVersion + "\n"
                     + "device=" + Build.MANUFACTURER + " " + Build.MODEL + "\n"
                     + "android=" + Build.VERSION.RELEASE + " sdk=" + Build.VERSION.SDK_INT + "\n"
-                    + "fingerprint=" + Build.FINGERPRINT + "\n";
-            prefs.edit()
-                    .putString(KEY_SESSION, session)
-                    .putString(KEY_HOOK_REPORT, "")
-                    .putString(KEY_HIT_REPORT, "")
-                    .putString(KEY_EVENT_REPORT, "")
-                    .apply();
+                    + "fingerprint=" + Build.FINGERPRINT + "\n"
+                    + "chrome=" + chromeVersion() + "\n";
+            emit(DiagnosticProvider.KIND_SESSION, session, System.currentTimeMillis());
+        } catch (Throwable t) {
+            safeLog("beginSession", t);
         }
     }
 
     static void scheduleScan(SharedPreferences prefs, ClassLoader loader) {
-        if (prefs == null || !Config.get(prefs, Config.DIAGNOSTIC_MODE)) return;
-        Thread t = new Thread(() -> {
-            try {
-                Thread.sleep(2500L);
-                scan(prefs, loader);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Throwable t1) {
-                event(prefs, "SCAN", "fatal: " + shortError(t1));
-            }
-        }, "ChromeX-hook-locator");
-        t.setDaemon(true);
-        t.start();
+        if (!enabled(prefs)) return;
+        try {
+            Thread t = new Thread(() -> {
+                try {
+                    Thread.sleep(2500L);
+                    scan(prefs, loader);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (Throwable scanError) {
+                    event(prefs, "SCAN", "fatal: " + shortError(scanError));
+                }
+            }, "ChromeX-hook-locator");
+            t.setDaemon(true);
+            t.start();
+        } catch (Throwable t) {
+            safeLog("scheduleScan", t);
+        }
     }
 
     static void hookInstalled(SharedPreferences prefs, String id, Method method) {
-        appendPrefLine(prefs, KEY_HOOK_REPORT,
-                "OK   " + id + " -> " + methodSignature(method), 80_000);
+        if (!enabled(prefs)) return;
+        try {
+            emit(DiagnosticProvider.KIND_HOOK,
+                    "OK   " + id + " -> " + methodSignature(method),
+                    System.currentTimeMillis());
+        } catch (Throwable t) {
+            safeLog("hookInstalled", t);
+        }
     }
 
     static void hookFailed(SharedPreferences prefs, String id, String target, Throwable error) {
-        appendPrefLine(prefs, KEY_HOOK_REPORT,
-                "FAIL " + id + " -> " + target + " :: " + shortError(error), 80_000);
+        if (!enabled(prefs)) return;
+        try {
+            emit(DiagnosticProvider.KIND_HOOK,
+                    "FAIL " + id + " -> " + target + " :: " + shortError(error),
+                    System.currentTimeMillis());
+        } catch (Throwable t) {
+            safeLog("hookFailed", t);
+        }
     }
 
     static void hit(SharedPreferences prefs, String id) {
-        if (prefs == null || !Config.get(prefs, Config.DIAGNOSTIC_MODE)) return;
-        long now = System.currentTimeMillis();
-        HITS.merge(id, 1L, Long::sum);
-        LAST_HIT.put(id, now);
-        long count = HITS.getOrDefault(id, 0L);
-        if (count == 1 || count == 5 || count == 20 || now - lastHitFlush >= 5000L) {
-            flushHits(prefs, now);
+        if (!enabled(prefs)) return;
+        try {
+            long time = System.currentTimeMillis();
+            HITS.merge(id, 1L, Long::sum);
+            LAST_HIT.put(id, time);
+            long count = HITS.getOrDefault(id, 0L);
+            if (count == 1 || count == 5 || count == 20 || time - lastHitFlush >= 5000L) {
+                flushHits(time);
+            }
+        } catch (Throwable t) {
+            safeLog("hit", t);
         }
     }
 
     static void event(SharedPreferences prefs, String level, String message) {
-        if (prefs == null || !Config.get(prefs, Config.DIAGNOSTIC_MODE)) return;
-        synchronized (LOCK) {
-            EVENTS.add(now() + " " + level + " " + message);
-            while (EVENTS.size() > MAX_EVENTS) EVENTS.remove(0);
-            StringBuilder out = new StringBuilder();
-            for (String line : EVENTS) out.append(line).append('\n');
-            prefs.edit().putString(KEY_EVENT_REPORT, out.toString()).apply();
+        if (!enabled(prefs)) return;
+        try {
+            String report;
+            synchronized (LOCK) {
+                EVENTS.add(now() + " " + level + " " + message);
+                while (EVENTS.size() > MAX_EVENTS) EVENTS.remove(0);
+                StringBuilder out = new StringBuilder();
+                for (String line : EVENTS) out.append(line).append('\n');
+                report = out.toString();
+            }
+            emit(DiagnosticProvider.KIND_EVENTS, report, System.currentTimeMillis());
+        } catch (Throwable t) {
+            safeLog("event", t);
         }
     }
 
     static void scan(SharedPreferences prefs, ClassLoader loader) {
-        StringBuilder out = new StringBuilder(64_000);
-        out.append("ChromeX automatic hook locator\n");
-        out.append("scan_time=").append(now()).append('\n');
-        out.append("chrome_version=").append(chromeVersion()).append('\n');
-        out.append("sdk=").append(Build.VERSION.SDK_INT).append('\n');
-        out.append("classloader=").append(loader == null ? "null" : loader.getClass().getName()).append("\n\n");
-
-        String[] stable = {
-                "org.chromium.base.CommandLine",
-                Chrome145.ACTIVITY,
-                Chrome145.TAB_MODEL,
-                Chrome145.TAB_MODEL_API,
-                Chrome145.CHROME_TAB_CREATOR,
-                Chrome145.LOAD_URL_PARAMS,
-                Chrome145.HOMEPAGE_MANAGER,
-                Chrome145.GURL,
-                Chrome145.PROFILE_MANAGER,
-                Chrome145.DOWNLOAD_INFO,
-                Chrome145.DOWNLOAD_CONTROLLER,
-                Chrome145.DOWNLOAD_MANAGER_SERVICE,
-                Chrome145.DOWNLOAD_UTILS,
-                "org.chromium.chrome.browser.download.DangerousDownloadDialogBridge",
-                "org.chromium.chrome.browser.download.InsecureDownloadDialogBridge",
-                "org.chromium.chrome.browser.download.DuplicateDownloadDialogBridge",
-                "org.chromium.chrome.browser.download.PolicyWarningDownloadDialogBridge",
-                "org.chromium.chrome.browser.download.DownloadDialogBridge",
-                "org.chromium.chrome.browser.download.OpenDownloadDialogBridge",
-                Chrome145.OFFLINE_ITEM,
-                Chrome145.OFFLINE_VISUALS,
-                Chrome145.PROPERTY_MODEL,
-                Chrome145.TRANSLATE_MESSAGE,
-                Chrome145.NATIVE
-        };
-
-        out.append("=== STABLE CLASS PROBE ===\n");
-        for (String name : stable) probeClass(loader, name, out);
-
-        out.append("\n=== LEGACY 145 SYMBOL PROBE ===\n");
-        for (String name : new String[]{Chrome145.COMMAND_FLAGS, Chrome145.SELECTOR,
-                Chrome145.HOMEPAGE, Chrome145.CLOSE_ALL_RUNNABLE, Chrome145.TAB_CREATOR,
-                Chrome145.DOWNLOAD_EVENT_RUNNABLE, Chrome145.OFFLINE_COMPLETE,
-                Chrome145.OPEN_DOWNLOAD_REQUEST, Chrome145.DOWNLOAD_MESSAGE,
-                Chrome145.MESSAGE_DISPATCHER}) {
-            probeClass(loader, name, out);
-        }
-
-        out.append("\n=== AUTOMATIC R8 CANDIDATES ===\n");
+        if (!enabled(prefs)) return;
         try {
-            locateShortR8Classes(loader, out);
-        } catch (Throwable t) {
-            out.append("R8_SCAN_FAILED: ").append(shortError(t)).append('\n');
-        }
+            StringBuilder out = new StringBuilder(64_000);
+            out.append("ChromeX automatic hook locator\n");
+            out.append("scan_time=").append(now()).append('\n');
+            out.append("chrome_version=").append(chromeVersion()).append('\n');
+            out.append("sdk=").append(Build.VERSION.SDK_INT).append('\n');
+            out.append("classloader=")
+                    .append(loader == null ? "null" : loader.getClass().getName())
+                    .append("\n\n");
 
-        out.append("\n=== DOWNLOADUTILS PARAMETER CLUES ===\n");
-        try {
-            Class<?> utils = Reflect.cls(loader, Chrome145.DOWNLOAD_UTILS);
-            for (Method m : utils.getDeclaredMethods()) {
-                String sig = methodSignature(m);
-                if (sig.contains("Download") || hasShortTopLevelParameter(m)) {
-                    out.append(sig).append('\n');
+            String[] stable = {
+                    "org.chromium.base.CommandLine",
+                    Chrome145.ACTIVITY,
+                    Chrome145.TAB_MODEL,
+                    Chrome145.TAB_MODEL_API,
+                    Chrome145.CHROME_TAB_CREATOR,
+                    Chrome145.LOAD_URL_PARAMS,
+                    Chrome145.HOMEPAGE_MANAGER,
+                    Chrome145.GURL,
+                    Chrome145.PROFILE_MANAGER,
+                    Chrome145.DOWNLOAD_INFO,
+                    Chrome145.DOWNLOAD_CONTROLLER,
+                    Chrome145.DOWNLOAD_MANAGER_SERVICE,
+                    Chrome145.DOWNLOAD_UTILS,
+                    "org.chromium.chrome.browser.download.DangerousDownloadDialogBridge",
+                    "org.chromium.chrome.browser.download.InsecureDownloadDialogBridge",
+                    "org.chromium.chrome.browser.download.DuplicateDownloadDialogBridge",
+                    "org.chromium.chrome.browser.download.PolicyWarningDownloadDialogBridge",
+                    "org.chromium.chrome.browser.download.DownloadDialogBridge",
+                    "org.chromium.chrome.browser.download.OpenDownloadDialogBridge",
+                    Chrome145.OFFLINE_ITEM,
+                    Chrome145.OFFLINE_VISUALS,
+                    Chrome145.PROPERTY_MODEL,
+                    Chrome145.TRANSLATE_MESSAGE,
+                    Chrome145.NATIVE
+            };
+
+            out.append("=== STABLE CLASS PROBE ===\n");
+            for (String name : stable) probeClass(loader, name, out);
+
+            out.append("\n=== LEGACY 145 SYMBOL PROBE ===\n");
+            for (String name : new String[]{Chrome145.COMMAND_FLAGS, Chrome145.SELECTOR,
+                    Chrome145.HOMEPAGE, Chrome145.CLOSE_ALL_RUNNABLE, Chrome145.TAB_CREATOR,
+                    Chrome145.DOWNLOAD_EVENT_RUNNABLE, Chrome145.OFFLINE_COMPLETE,
+                    Chrome145.OPEN_DOWNLOAD_REQUEST, Chrome145.DOWNLOAD_MESSAGE,
+                    Chrome145.MESSAGE_DISPATCHER}) {
+                probeClass(loader, name, out);
+            }
+
+            out.append("\n=== AUTOMATIC R8 CANDIDATES ===\n");
+            try {
+                locateShortR8Classes(loader, out);
+            } catch (Throwable t) {
+                out.append("R8_SCAN_FAILED: ").append(shortError(t)).append('\n');
+            }
+
+            out.append("\n=== DOWNLOADUTILS PARAMETER CLUES ===\n");
+            try {
+                Class<?> utils = Reflect.cls(loader, Chrome145.DOWNLOAD_UTILS);
+                for (Method m : utils.getDeclaredMethods()) {
+                    String sig = methodSignature(m);
+                    if (sig.contains("Download") || hasShortTopLevelParameter(m)) {
+                        out.append(sig).append('\n');
+                    }
                 }
+            } catch (Throwable t) {
+                out.append("DownloadUtils inspect failed: ").append(shortError(t)).append('\n');
+            }
+
+            String report = trim(out.toString(), MAX_REPORT_CHARS);
+            emit(DiagnosticProvider.KIND_SCAN, report, System.currentTimeMillis());
+            event(prefs, "SCAN", "completed, chars=" + report.length());
+        } catch (Throwable t) {
+            safeLog("scan", t);
+            event(prefs, "SCAN", "fatal: " + shortError(t));
+        }
+    }
+
+    private static void flushHits(long time) {
+        try {
+            ArrayList<String> ids = new ArrayList<>(HITS.keySet());
+            ids.sort(String::compareTo);
+            StringBuilder out = new StringBuilder();
+            for (String id : ids) {
+                long count = HITS.getOrDefault(id, 0L);
+                long last = LAST_HIT.getOrDefault(id, 0L);
+                out.append(id)
+                        .append(" count=").append(count)
+                        .append(" last=").append(last <= 0L ? "never" : formatTime(last))
+                        .append('\n');
+            }
+            emit(DiagnosticProvider.KIND_HITS, out.toString(), time);
+            lastHitFlush = time;
+        } catch (Throwable t) {
+            safeLog("flushHits", t);
+        }
+    }
+
+    private static boolean enabled(SharedPreferences prefs) {
+        try {
+            return Config.get(prefs, Config.DIAGNOSTIC_MODE);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    private static void emit(String kind, String text, long time) {
+        try {
+            Context context = chromeContext();
+            if (context == null) throw new IllegalStateException("Chrome application context unavailable");
+            ContentValues values = new ContentValues();
+            values.put(DiagnosticProvider.COL_KIND, kind);
+            values.put(DiagnosticProvider.COL_TEXT, text == null ? "" : text);
+            values.put(DiagnosticProvider.COL_TIME, time);
+            if (context.getContentResolver().insert(DiagnosticProvider.URI, values) == null) {
+                throw new IllegalStateException("DiagnosticProvider returned null");
             }
         } catch (Throwable t) {
-            out.append("DownloadUtils inspect failed: ").append(shortError(t)).append('\n');
+            if (!providerFailureLogged) {
+                providerFailureLogged = true;
+                safeLog("diagnostic IPC unavailable", t);
+            }
         }
+    }
 
-        String report = trim(out.toString(), MAX_REPORT_CHARS);
-        prefs.edit()
-                .putString(KEY_SCAN_REPORT, report)
-                .putLong(KEY_LAST_SCAN, System.currentTimeMillis())
-                .apply();
-        event(prefs, "SCAN", "completed, chars=" + report.length());
+    private static Context chromeContext() {
+        try {
+            Class<?> thread = Class.forName("android.app.ActivityThread");
+            Object app = thread.getMethod("currentApplication").invoke(null);
+            return app instanceof Application ? (Application) app : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static void probeClass(ClassLoader loader, String name, StringBuilder out) {
@@ -210,7 +308,8 @@ final class Diagnostics {
                         .append(f.getType().getName()).append(' ').append(f.getName()).append('\n');
             }
         } catch (Throwable t) {
-            out.append("CLASS MISSING ").append(name).append(" :: ").append(shortError(t)).append('\n');
+            out.append("CLASS MISSING ").append(name).append(" :: ")
+                    .append(shortError(t)).append('\n');
         }
     }
 
@@ -284,7 +383,8 @@ final class Diagnostics {
         }
 
         for (Map.Entry<String, List<String>> e : hits.entrySet()) {
-            out.append("\n[").append(e.getKey()).append("] candidates=").append(e.getValue().size()).append('\n');
+            out.append("\n[").append(e.getKey()).append("] candidates=")
+                    .append(e.getValue().size()).append('\n');
             for (String line : e.getValue()) out.append("  ").append(line).append('\n');
         }
     }
@@ -364,69 +464,31 @@ final class Diagnostics {
         try {
             return c.getName();
         } catch (Throwable ignored) {
-            return "<?>";
-        }
-    }
-
-    private static void flushHits(SharedPreferences prefs, long now) {
-        synchronized (LOCK) {
-            StringBuilder out = new StringBuilder();
-            for (Map.Entry<String, Long> e : new LinkedHashMap<>(HITS).entrySet()) {
-                long last = LAST_HIT.getOrDefault(e.getKey(), 0L);
-                out.append(e.getKey()).append(" count=").append(e.getValue())
-                        .append(" last=").append(formatTime(last)).append('\n');
-            }
-            prefs.edit().putString(KEY_HIT_REPORT, out.toString()).apply();
-            lastHitFlush = now;
-        }
-    }
-
-    private static void appendPrefLine(SharedPreferences prefs, String key, String line, int maxChars) {
-        if (prefs == null) return;
-        synchronized (LOCK) {
-            String current;
-            try {
-                current = prefs.getString(key, "");
-            } catch (Throwable ignored) {
-                current = "";
-            }
-            if (current == null) current = "";
-            String next = current + line + '\n';
-            if (next.length() > maxChars) next = next.substring(next.length() - maxChars);
-            prefs.edit().putString(key, next).apply();
-        }
-    }
-
-    private static String chromeVersion() {
-        try {
-            Application app = currentApplication();
-            if (app == null) return "unknown";
-            PackageInfo info = app.getPackageManager().getPackageInfo(Chrome145.PACKAGE, 0);
-            return info.versionName + " (" + info.getLongVersionCode() + ")";
-        } catch (Throwable t) {
-            return "unknown: " + shortError(t);
-        }
-    }
-
-    private static Application currentApplication() {
-        try {
-            Class<?> thread = Class.forName("android.app.ActivityThread");
-            Object app = thread.getMethod("currentApplication").invoke(null);
-            return app instanceof Application ? (Application) app : null;
-        } catch (Throwable ignored) {
-            return null;
+            return String.valueOf(c);
         }
     }
 
     private static String shortError(Throwable t) {
         if (t == null) return "unknown";
-        String msg = t.getMessage();
-        return t.getClass().getSimpleName() + (msg == null ? "" : ": " + msg.replace('\n', ' '));
+        String message = t.getMessage();
+        if (message == null || message.isBlank()) return t.getClass().getName();
+        return t.getClass().getName() + ": " + message.replace('\n', ' ');
     }
 
-    private static String trim(String text, int max) {
-        if (text.length() <= max) return text;
-        return text.substring(0, max) + "\n... report truncated ...\n";
+    private static String trim(String value, int max) {
+        if (value == null || value.length() <= max) return value == null ? "" : value;
+        return value.substring(0, max) + "\n... diagnostic report truncated ...\n";
+    }
+
+    private static String chromeVersion() {
+        try {
+            Context context = chromeContext();
+            if (context == null) return "unknown";
+            PackageInfo info = context.getPackageManager().getPackageInfo(Chrome145.PACKAGE, 0);
+            return info.versionName == null ? "unknown" : info.versionName;
+        } catch (Throwable ignored) {
+            return "unknown";
+        }
     }
 
     private static String now() {
@@ -434,9 +496,14 @@ final class Diagnostics {
     }
 
     private static String formatTime(long value) {
-        if (value <= 0L) return "never";
         SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.US);
         f.setTimeZone(TimeZone.getDefault());
         return f.format(new Date(value));
+    }
+
+    private static void safeLog(String where, Throwable t) {
+        try {
+            Log.w("ChromeXDiag", where + " failed: " + shortError(t));
+        } catch (Throwable ignored) {}
     }
 }
