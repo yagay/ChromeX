@@ -14,7 +14,7 @@
             android:name=".DiagnosticProvider"
             android:authorities="com.yagay.chromex.diagnostics"
             android:exported="true"
-            android:grantUriPermissions="false" />
+            android:grantUriPermissions="true" />
 
         <activity
             android:name=".MainActivity"
