@@ -21,6 +21,7 @@ public final class Config {
     public static final String APK_TOAST = "apk_toast";
     public static final String ALL_DOWNLOAD_TOAST = "all_download_toast";
     public static final String HIDE_TRANSLATE = "hide_translate";
+    public static final String DIAGNOSTIC_MODE = "diagnostic_mode";
 
     private Config() {}
 
