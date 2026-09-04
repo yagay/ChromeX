@@ -12,6 +12,7 @@ import android.os.Environment;
 import android.provider.MediaStore;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -27,6 +28,9 @@ import java.util.zip.ZipOutputStream;
 
 final class DiagnosticExporter {
     private static final int COMMAND_LIMIT = 4 * 1024 * 1024;
+    private static final String[] SU_CANDIDATES = {
+            "/system/bin/su", "/system/xbin/su", "/sbin/su", "su"
+    };
 
     private DiagnosticExporter() {}
 
@@ -42,11 +46,28 @@ final class DiagnosticExporter {
         }
     }
 
-    static Result export(Context context, SharedPreferences prefs) {
+    private static final class RootProbe {
+        final String su;
+        final String detail;
+
+        RootProbe(String su, String detail) {
+            this.su = su;
+            this.detail = detail;
+        }
+
+        boolean available() {
+            return su != null;
+        }
+    }
+
+    static Result export(Context context, SharedPreferences settingsPrefs) {
         String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
         String name = "ChromeX-diagnostic-" + stamp + ".zip";
         Uri uri = null;
         try {
+            SharedPreferences diagnosticPrefs = DiagnosticProvider.store(context);
+            RootProbe root = probeRoot();
+
             ContentResolver resolver = context.getContentResolver();
             ContentValues values = new ContentValues();
             values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
@@ -62,41 +83,58 @@ final class DiagnosticExporter {
                 add(zip, "README.txt",
                         "ChromeX diagnostic package\n"
                                 + "Generated: " + now() + "\n\n"
+                                + "Diagnostic architecture:\n"
+                                + "- RemotePreferences are settings-only and read-only inside Chrome.\n"
+                                + "- Hook/session/hit/scan data are sent to ChromeX DiagnosticProvider.\n"
+                                + "- Diagnostic failures never block functional hooks.\n\n"
                                 + "Recommended reproduction flow:\n"
-                                + "1. Enable Diagnostic mode in ChromeX.\n"
-                                + "2. Tap 'Re-scan hook points' or force-stop and reopen Chrome.\n"
-                                + "3. Reproduce each broken ChromeX feature once.\n"
-                                + "4. Return to ChromeX and export this package.\n\n"
-                                + "The package contains only ChromeX settings/status, automatic hook-point probes,\n"
-                                + "hook install/hit reports, filtered logcat, and filtered LSPosed log excerpts.\n");
-                add(zip, "device_and_packages.txt", deviceInfo(context));
-                add(zip, "settings.txt", settings(prefs));
-                add(zip, "module_session.txt", prefString(prefs, Diagnostics.KEY_SESSION));
-                add(zip, "hook_points.txt", prefString(prefs, Diagnostics.KEY_SCAN_REPORT));
-                add(zip, "hook_install.txt", prefString(prefs, Diagnostics.KEY_HOOK_REPORT));
-                add(zip, "hook_hits.txt", prefString(prefs, Diagnostics.KEY_HIT_REPORT));
-                add(zip, "module_events.txt", prefString(prefs, Diagnostics.KEY_EVENT_REPORT));
+                                + "1. Keep Diagnostic mode enabled.\n"
+                                + "2. Tap 'Re-scan hook points' or manually force-stop/reopen Chrome.\n"
+                                + "3. Reproduce every broken feature at least once.\n"
+                                + "4. Return to ChromeX and export this package.\n");
+                add(zip, "device_and_packages.txt", deviceInfo(context, root));
+                add(zip, "root_status.txt", root.detail + "\n");
+                add(zip, "settings.txt", settings(settingsPrefs, diagnosticPrefs));
+                add(zip, "module_session.txt",
+                        prefString(diagnosticPrefs, Diagnostics.KEY_SESSION));
+                add(zip, "hook_points.txt",
+                        prefString(diagnosticPrefs, Diagnostics.KEY_SCAN_REPORT));
+                add(zip, "hook_install.txt",
+                        prefString(diagnosticPrefs, Diagnostics.KEY_HOOK_REPORT));
+                add(zip, "hook_hits.txt",
+                        prefString(diagnosticPrefs, Diagnostics.KEY_HIT_REPORT));
+                add(zip, "module_events.txt",
+                        prefString(diagnosticPrefs, Diagnostics.KEY_EVENT_REPORT));
 
-                String logcat = commandWithFallback(
-                        new String[]{"su", "-c", "logcat -d -v threadtime -t 6000"},
-                        new String[]{"logcat", "-d", "-v", "threadtime", "-t", "1500"});
+                String logcat;
+                if (root.available()) {
+                    logcat = run(new String[]{root.su, "-c",
+                            "logcat -d -v threadtime -t 8000"}, 10);
+                } else {
+                    logcat = run(new String[]{"logcat", "-d", "-v", "threadtime", "-t", "1800"}, 8);
+                }
                 add(zip, "logcat_filtered.txt", filterRelevant(logcat));
 
-                String lspd = run(new String[]{"su", "-c",
-                        "for d in /data/adb/lspd/log /data/adb/lsposed/log; do "
-                                + "[ -d \"$d\" ] || continue; "
-                                + "for f in \"$d\"/* \"$d\"/*/* \"$d\"/*/*/*; do "
-                                + "[ -f \"$f\" ] || continue; "
-                                + "echo ===== $f =====; tail -n 900 \"$f\" 2>/dev/null; "
-                                + "done; done"});
+                String lspd;
+                if (root.available()) {
+                    lspd = run(new String[]{root.su, "-c",
+                            "for d in /data/adb/lspd/log /data/adb/lsposed/log; do "
+                                    + "[ -d \"$d\" ] || continue; "
+                                    + "for f in \"$d\"/* \"$d\"/*/* \"$d\"/*/*/*; do "
+                                    + "[ -f \"$f\" ] || continue; "
+                                    + "echo ===== $f =====; tail -n 1200 \"$f\" 2>/dev/null; "
+                                    + "done; done"}, 12);
+                } else {
+                    lspd = "Root unavailable. LSPosed private log directories could not be read.\n"
+                            + root.detail + "\n";
+                }
                 add(zip, "lsposed_filtered.txt", filterRelevant(lspd));
             }
 
             ContentValues done = new ContentValues();
             done.put(MediaStore.MediaColumns.IS_PENDING, 0);
             resolver.update(uri, done, null, null);
-            return new Result(true,
-                    "已保存到 Download/ChromeX/" + name, uri);
+            return new Result(true, "已保存到 Download/ChromeX/" + name, uri);
         } catch (Throwable t) {
             if (uri != null) {
                 try {
@@ -109,30 +147,53 @@ final class DiagnosticExporter {
     }
 
     static boolean restartChrome(Context context) {
-        boolean stopped = false;
+        RootProbe root = probeRoot();
+        if (!root.available()) return false;
         try {
-            String output = run(new String[]{"su", "-c", "am force-stop " + Chrome145.PACKAGE});
-            stopped = output != null;
+            run(new String[]{root.su, "-c", "am force-stop " + Chrome145.PACKAGE}, 5);
             Thread.sleep(350L);
-        } catch (Throwable ignored) {}
-        try {
             Intent launch = context.getPackageManager().getLaunchIntentForPackage(Chrome145.PACKAGE);
-            if (launch != null) {
-                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                context.startActivity(launch);
-                return stopped;
-            }
-        } catch (Throwable ignored) {}
-        return false;
+            if (launch == null) return false;
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            context.startActivity(launch);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
-    private static String deviceInfo(Context context) {
+    static String rootStatus() {
+        return probeRoot().detail;
+    }
+
+    private static RootProbe probeRoot() {
+        StringBuilder failures = new StringBuilder();
+        for (String candidate : SU_CANDIDATES) {
+            String result = run(new String[]{candidate, "-c", "id"}, 4);
+            if (result != null && result.contains("uid=0")) {
+                return new RootProbe(candidate,
+                        "Root：已授权（" + candidate + "）\n" + firstLine(result));
+            }
+            if (failures.length() < 1200) {
+                failures.append(candidate).append(" -> ").append(firstLine(result)).append('\n');
+            }
+        }
+        return new RootProbe(null,
+                "Root：不可用或 ChromeX 未获得 Root 授权。\n"
+                        + "如果使用 KernelSU/KernelSU Next，请在管理器中给 ChromeX 授予超级用户权限。\n"
+                        + failures);
+    }
+
+    private static String deviceInfo(Context context, RootProbe root) {
         StringBuilder out = new StringBuilder();
         out.append("generated=").append(now()).append('\n');
         out.append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
         out.append("brand=").append(Build.BRAND).append(" product=").append(Build.PRODUCT).append('\n');
-        out.append("android=").append(Build.VERSION.RELEASE).append(" sdk=").append(Build.VERSION.SDK_INT).append('\n');
+        out.append("android=").append(Build.VERSION.RELEASE)
+                .append(" sdk=").append(Build.VERSION.SDK_INT).append('\n');
         out.append("fingerprint=").append(Build.FINGERPRINT).append('\n');
+        out.append("root=").append(root.available() ? "authorized" : "unavailable").append('\n');
+        if (root.su != null) out.append("su=").append(root.su).append('\n');
         appendPackage(context, out, "ChromeX", context.getPackageName());
         appendPackage(context, out, "Chrome", Chrome145.PACKAGE);
         return out.toString();
@@ -150,7 +211,7 @@ final class DiagnosticExporter {
         }
     }
 
-    private static String settings(SharedPreferences prefs) {
+    private static String settings(SharedPreferences settingsPrefs, SharedPreferences diagnosticPrefs) {
         String[] keys = {
                 Config.CLEAN_START, Config.NEWTAB_HOME, Config.CLEAR_CLOSED_TABS,
                 Config.BYPASS_DANGEROUS, Config.BYPASS_INSECURE, Config.BYPASS_DUPLICATE,
@@ -159,17 +220,20 @@ final class DiagnosticExporter {
                 Config.HIDE_TRANSLATE, Config.DIAGNOSTIC_MODE
         };
         StringBuilder out = new StringBuilder();
-        for (String key : keys) out.append(key).append('=').append(Config.get(prefs, key)).append('\n');
-        if (prefs != null) {
-            try {
-                out.append("last_scan_ms=").append(prefs.getLong(Diagnostics.KEY_LAST_SCAN, 0L)).append('\n');
-            } catch (Throwable ignored) {}
+        for (String key : keys) {
+            out.append(key).append('=').append(Config.get(settingsPrefs, key)).append('\n');
+        }
+        try {
+            out.append("last_scan_ms=")
+                    .append(diagnosticPrefs.getLong(Diagnostics.KEY_LAST_SCAN, 0L)).append('\n');
+        } catch (Throwable ignored) {
+            out.append("last_scan_ms=read_failed\n");
         }
         return out.toString();
     }
 
     private static String prefString(SharedPreferences prefs, String key) {
-        if (prefs == null) return "RemotePreferences unavailable.\n";
+        if (prefs == null) return "Diagnostic store unavailable.\n";
         try {
             String value = prefs.getString(key, "");
             return value == null || value.isEmpty() ? "No data recorded.\n" : value;
@@ -178,30 +242,42 @@ final class DiagnosticExporter {
         }
     }
 
-    private static String commandWithFallback(String[] preferred, String[] fallback) {
-        String value = run(preferred);
-        if (value == null || value.isBlank() || value.startsWith("COMMAND_ERROR:")) {
-            value = run(fallback);
-        }
-        return value == null ? "" : value;
-    }
-
-    private static String run(String[] command) {
+    private static String run(String[] command, int timeoutSeconds) {
         Process process = null;
+        Thread reader = null;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
         try {
             process = new ProcessBuilder(command).redirectErrorStream(true).start();
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            InputStream input = process.getInputStream();
-            byte[] buffer = new byte[8192];
-            int total = 0;
-            while (total < COMMAND_LIMIT) {
-                int n = input.read(buffer, 0, Math.min(buffer.length, COMMAND_LIMIT - total));
-                if (n < 0) break;
-                out.write(buffer, 0, n);
-                total += n;
+            Process target = process;
+            reader = new Thread(() -> {
+                try (InputStream input = target.getInputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int total = 0;
+                    while (total < COMMAND_LIMIT) {
+                        int n = input.read(buffer, 0,
+                                Math.min(buffer.length, COMMAND_LIMIT - total));
+                        if (n < 0) break;
+                        synchronized (out) {
+                            out.write(buffer, 0, n);
+                        }
+                        total += n;
+                    }
+                } catch (Throwable ignored) {}
+            }, "ChromeX-command-reader");
+            reader.setDaemon(true);
+            reader.start();
+
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
             }
-            if (!process.waitFor(8, TimeUnit.SECONDS)) process.destroyForcibly();
-            return out.toString(StandardCharsets.UTF_8);
+            try {
+                reader.join(1200L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            synchronized (out) {
+                return out.toString(StandardCharsets.UTF_8);
+            }
         } catch (Throwable t) {
             return "COMMAND_ERROR: " + t.getClass().getSimpleName() + ": " + t.getMessage();
         } finally {
@@ -214,15 +290,16 @@ final class DiagnosticExporter {
     }
 
     private static String filterRelevant(String raw) {
-        if (raw == null || raw.isBlank()) return "No log data available. Root may be unavailable.\n";
+        if (raw == null || raw.isBlank()) return "No log data available.\n";
         StringBuilder out = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                new java.io.ByteArrayInputStream(raw.getBytes(StandardCharsets.UTF_8)),
+                new ByteArrayInputStream(raw.getBytes(StandardCharsets.UTF_8)),
                 StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String low = line.toLowerCase(Locale.ROOT);
                 if (low.contains("chromex")
+                        || low.contains("chromexdiag")
                         || low.contains("com.yagay.chromex")
                         || low.contains("com.android.chrome")
                         || low.contains("chromium")
@@ -249,6 +326,13 @@ final class DiagnosticExporter {
                     + raw.substring(0, Math.min(raw.length(), 2000));
         }
         return out.toString();
+    }
+
+    private static String firstLine(String value) {
+        if (value == null || value.isBlank()) return "no output";
+        int nl = value.indexOf('\n');
+        String result = nl >= 0 ? value.substring(0, nl) : value;
+        return result.length() > 220 ? result.substring(0, 220) : result;
     }
 
     private static void add(ZipOutputStream zip, String name, String content) throws Exception {
