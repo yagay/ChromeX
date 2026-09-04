@@ -2,6 +2,7 @@ package com.yagay.chromex;
 
 import android.app.Activity;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.ViewGroup;
@@ -51,7 +52,8 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(title);
 
         TextView desc = new TextView(this);
-        desc.setText("Chrome 145 专用 · libxposed Modern API 102");
+        desc.setText("Chrome 自适应兼容 · libxposed Modern API 102\n已安装 Chrome: "
+                + installedChromeVersion());
         desc.setTextSize(14f);
         desc.setPadding(0, dp(4), 0, dp(12));
         content.addView(desc);
@@ -102,6 +104,15 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         });
         content.addView(sw, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private String installedChromeVersion() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(Chrome145.PACKAGE, 0);
+            return info.versionName == null ? "未知" : info.versionName;
+        } catch (Throwable ignored) {
+            return "未安装/不可读取";
+        }
     }
 
     private int dp(int value) {
