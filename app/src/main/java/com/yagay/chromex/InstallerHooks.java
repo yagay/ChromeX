@@ -45,15 +45,70 @@ final class InstallerHooks {
     }
 
     void install() {
+        // Stable/current paths first.
+        hookManagerServiceCompletion();
+        hookControllerCompletion();
+        hookCurrentOpenDownload();
+
+        // Chrome 145 compatibility paths.
         hookNotificationCompletion();
         hookOfflineCompletion();
-        hookOpenDownload();
-        hookControllerCompletion();
+        hookLegacyOpenDownload();
+    }
+
+    private void hookManagerServiceCompletion() {
+        hooks.all(loader, Chrome145.DOWNLOAD_MANAGER_SERVICE, "onDownloadCompleted",
+                "chromex:installer:manager-complete", chain -> {
+                    Object result = chain.proceed();
+                    if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return result;
+                    Object info = findDownloadInfo(chain.getArgs().toArray());
+                    if (info != null) enqueueDownloadInfo(info, "DownloadManagerService");
+                    return result;
+                });
+    }
+
+    private void hookControllerCompletion() {
+        // Signature has changed across Chrome releases. Hook the stable method name and locate the
+        // DownloadInfo argument by type instead of assuming (Tab, DownloadInfo, boolean).
+        hooks.all(loader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
+                "chromex:installer:controller", chain -> {
+                    Object result = chain.proceed();
+                    if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return result;
+                    Object info = findDownloadInfo(chain.getArgs().toArray());
+                    if (info != null) enqueueDownloadInfo(info, "DownloadController");
+                    return result;
+                });
+    }
+
+    private void hookCurrentOpenDownload() {
+        // Current Chromium keeps this JNI-facing entry point stable. It receives filePath, mime,
+        // guid, profile, originalUrl, referrer, source, fileName.
+        hooks.all(loader, Chrome145.DOWNLOAD_UTILS, "openDownload",
+                "chromex:installer:open-current", chain -> {
+                    if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return chain.proceed();
+                    Object[] args = chain.getArgs().toArray();
+                    if (args.length < 2) return chain.proceed();
+                    String path = args[0] instanceof String ? (String) args[0] : null;
+                    String mime = args[1] instanceof String ? (String) args[1] : null;
+                    String name = args.length > 0 && args[args.length - 1] instanceof String
+                            ? (String) args[args.length - 1] : null;
+                    if (!isApk(mime, name != null ? name : path)) return chain.proceed();
+                    try {
+                        String fileName = normalizedName(name, path);
+                        Uri uri = resolveUri(path, fileName);
+                        if (uri != null && launch(uri, fileName == null ? uri.toString() : fileName)) {
+                            return null;
+                        }
+                    } catch (Throwable t) {
+                        hooks.error("current open-download APK hook", t);
+                    }
+                    return chain.proceed();
+                });
     }
 
     private void hookNotificationCompletion() {
         hooks.exact(loader, Chrome145.DOWNLOAD_EVENT_RUNNABLE, "run", new Class<?>[0],
-                "chromex:installer:event", chain -> {
+                "chromex:installer:event:145", chain -> {
                     Object result = chain.proceed();
                     if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return result;
                     try {
@@ -66,7 +121,8 @@ final class InstallerHooks {
                         String name = stringField(info, "g");
                         enqueueIfApk(mime, path, name);
                     } catch (Throwable t) {
-                        hooks.error("download-event APK detection", t);
+                        hooks.warn("legacy download-event path unavailable: "
+                                + t.getClass().getSimpleName());
                     }
                     return result;
                 });
@@ -77,7 +133,7 @@ final class InstallerHooks {
             Class<?> item = Reflect.cls(loader, Chrome145.OFFLINE_ITEM);
             Class<?> visuals = Reflect.cls(loader, Chrome145.OFFLINE_VISUALS);
             hooks.exact(loader, Chrome145.OFFLINE_COMPLETE, "f",
-                    new Class<?>[]{item, visuals}, "chromex:installer:offline", chain -> {
+                    new Class<?>[]{item, visuals}, "chromex:installer:offline:145", chain -> {
                         Object result = chain.proceed();
                         if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return result;
                         try {
@@ -88,20 +144,21 @@ final class InstallerHooks {
                             enqueueIfApk(stringField(value, "f0"),
                                     stringField(value, "P"), stringField(value, "e0"));
                         } catch (Throwable t) {
-                            hooks.error("offline-item APK detection", t);
+                            hooks.warn("legacy offline-item path unavailable: "
+                                    + t.getClass().getSimpleName());
                         }
                         return result;
                     });
         } catch (Throwable t) {
-            hooks.error("install offline APK hook", t);
+            hooks.warn("legacy offline APK hook unavailable: " + t.getClass().getSimpleName());
         }
     }
 
-    private void hookOpenDownload() {
+    private void hookLegacyOpenDownload() {
         try {
             Class<?> request = Reflect.cls(loader, Chrome145.OPEN_DOWNLOAD_REQUEST);
             hooks.exact(loader, Chrome145.DOWNLOAD_UTILS, "a", new Class<?>[]{request},
-                    "chromex:installer:open", chain -> {
+                    "chromex:installer:open:145", chain -> {
                         if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return chain.proceed();
                         Object value = chain.getArg(0);
                         if (value == null) return chain.proceed();
@@ -115,37 +172,35 @@ final class InstallerHooks {
                             if (!launch(uri, name == null ? uri.toString() : name)) return chain.proceed();
                             return Boolean.TRUE;
                         } catch (Throwable t) {
-                            hooks.error("open-download APK hook", t);
+                            hooks.warn("legacy open-download path unavailable: "
+                                    + t.getClass().getSimpleName());
                             return chain.proceed();
                         }
                     });
         } catch (Throwable t) {
-            hooks.error("install open-download APK hook", t);
+            hooks.warn("legacy open-download APK hook unavailable: " + t.getClass().getSimpleName());
         }
     }
 
-    private void hookControllerCompletion() {
+    private Object findDownloadInfo(Object[] args) {
         try {
-            Class<?> tab = Reflect.cls(loader, "org.chromium.chrome.browser.tab.Tab");
-            Class<?> info = Reflect.cls(loader, Chrome145.DOWNLOAD_INFO);
-            hooks.exact(loader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
-                    new Class<?>[]{tab, info, boolean.class},
-                    "chromex:installer:controller", chain -> {
-                        Object result = chain.proceed();
-                        if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return result;
-                        try {
-                            Object value = chain.getArg(1);
-                            if (value != null) {
-                                enqueueIfApk(stringField(value, "c"),
-                                        stringField(value, "e"), stringField(value, "g"));
-                            }
-                        } catch (Throwable t) {
-                            hooks.error("controller APK detection", t);
-                        }
-                        return result;
-                    });
+            Class<?> infoType = Reflect.cls(loader, Chrome145.DOWNLOAD_INFO);
+            for (Object arg : args) {
+                if (arg != null && infoType.isAssignableFrom(arg.getClass())) return arg;
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private void enqueueDownloadInfo(Object info, String source) {
+        try {
+            String mime = stringAccessor(info, "getMimeType", "c");
+            String path = stringAccessor(info, "getFilePath", "e");
+            String name = stringAccessor(info, "getFileName", "g");
+            hooks.info(source + " completion: " + (name == null ? "<unnamed>" : name));
+            enqueueIfApk(mime, path, name);
         } catch (Throwable t) {
-            hooks.error("install DownloadController APK hook", t);
+            hooks.error(source + " DownloadInfo", t);
         }
     }
 
@@ -212,6 +267,22 @@ final class InstallerHooks {
     }
 
     private Uri chromeContentUri(String absolutePath) {
+        // Current Chromium utility names can change. Search compatible one-String methods that
+        // return Uri first, then keep the old Chrome 145 'e' method as fallback.
+        try {
+            Class<?> utils = Reflect.cls(loader, Chrome145.DOWNLOAD_UTILS);
+            for (Method method : utils.getDeclaredMethods()) {
+                if (method.getParameterCount() != 1
+                        || method.getParameterTypes()[0] != String.class
+                        || !Uri.class.isAssignableFrom(method.getReturnType())) continue;
+                method.setAccessible(true);
+                Object value = method.invoke(null, absolutePath);
+                if (value instanceof Uri) {
+                    Uri uri = (Uri) value;
+                    if (uri.getScheme() != null && !"file".equals(uri.getScheme())) return uri;
+                }
+            }
+        } catch (Throwable ignored) {}
         try {
             Class<?> utils = Reflect.cls(loader, Chrome145.DOWNLOAD_UTILS);
             Method method = Reflect.exact(utils, "e", String.class);
@@ -278,6 +349,15 @@ final class InstallerHooks {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private static String stringAccessor(Object value, String getter, String legacyField) {
+        if (value == null) return null;
+        try {
+            Object result = Reflect.call(value, getter);
+            if (result instanceof String) return (String) result;
+        } catch (Throwable ignored) {}
+        return stringField(value, legacyField);
     }
 
     private static String stringField(Object value, String field) {
