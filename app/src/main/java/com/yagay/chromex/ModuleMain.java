@@ -93,18 +93,32 @@ public final class ModuleMain extends XposedModule {
                 ExtensionBackend backend = ExtensionBackendSelector.select(report, classLoader);
                 ExtensionRuntimeRegistry.set(report, backend);
 
+                boolean googleGateHooked = false;
                 boolean liteRuntimeHooked = false;
                 boolean storePageHooked = false;
-                if (backend.mode() == ExtensionRuntimeMode.LITE && backend.isAvailable()) {
+
+                if (backend.mode() == ExtensionRuntimeMode.GOOGLE_DESKTOP_FULL
+                        && backend instanceof GoogleDesktopExtensionBackend
+                        && backend.isAvailable()) {
+                    googleGateHooked = GoogleDesktopExtensionRuntime.install(
+                            (GoogleDesktopExtensionBackend) backend, hooks);
+                } else if (backend.mode() == ExtensionRuntimeMode.LITE && backend.isAvailable()) {
                     liteRuntimeHooked = LiteExtensionRuntime.install(classLoader, hooks);
                     storePageHooked = LiteExtensionStorePageRuntime.install(runtime, hooks);
                 }
-                if (backend.mode() != ExtensionRuntimeMode.NONE) {
+
+                // Google Desktop Android uses Chromium's own Web Store/CRX pipeline. Vendor FULL
+                // and LITE continue to use ChromeX's download completion entry point.
+                if (backend.mode() == ExtensionRuntimeMode.VENDOR_FULL
+                        || backend.mode() == ExtensionRuntimeMode.LITE) {
                     new ExtensionCrxDownloadHooks(profile, runtime, hooks).install();
                 }
 
                 StringBuilder extra = new StringBuilder();
-                if (backend.mode() == ExtensionRuntimeMode.FULL && backend.isAvailable()) {
+                if (backend.mode() == ExtensionRuntimeMode.GOOGLE_DESKTOP_FULL) {
+                    extra.append("googleGateHooked=").append(googleGateHooked).append('\n');
+                }
+                if (backend.mode() == ExtensionRuntimeMode.VENDOR_FULL && backend.isAvailable()) {
                     extra.append("installedExtensions=")
                             .append(backend.getInstalledExtensionIds().size()).append('\n');
                 }
@@ -149,6 +163,7 @@ public final class ModuleMain extends XposedModule {
     @Override
     public void onHotReloaded(HotReloadedParam param) {
         ExtensionRuntimeRegistry.clear();
+        GoogleDesktopExtensionRuntime.resetForHotReload();
         for (HookHandle handle : param.getOldHookHandles()) {
             try { handle.unhook(); } catch (Throwable ignored) {}
         }
