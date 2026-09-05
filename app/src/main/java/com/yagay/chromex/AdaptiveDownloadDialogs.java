@@ -152,20 +152,12 @@ final class AdaptiveDownloadDialogs {
 
     private Method uniqueStringBooleanCallback(Object bridge) {
         if (bridge == null) return null;
-        Method found = null;
-        Class<?> type = bridge.getClass();
-        while (type != null && type != Object.class) {
-            for (Method m : type.getDeclaredMethods()) {
-                if (Modifier.isStatic(m.getModifiers()) || "showDialog".equals(m.getName())) continue;
-                Class<?>[] p = m.getParameterTypes();
-                if (p.length != 2 || p[0] != String.class || p[1] != boolean.class) continue;
-                if (found != null) return null;
-                m.setAccessible(true);
-                found = m;
-            }
-            type = type.getSuperclass();
-        }
-        return found;
+        // Override-aware resolution prevents a child override plus its superclass declaration from
+        // being incorrectly treated as two ambiguous callbacks.
+        Method method = Reflect.signature(bridge.getClass(), void.class,
+                String.class, boolean.class);
+        if (method != null && !"showDialog".equals(method.getName())) return method;
+        return null;
     }
 
     private boolean invokeJni(String className, String[] methodNames, Object... args) {
@@ -201,11 +193,8 @@ final class AdaptiveDownloadDialogs {
             type = type.getSuperclass();
         }
         if (found == null) return 0L;
-        try {
-            return found.getLong(bridge);
-        } catch (Throwable ignored) {
-            return 0L;
-        }
+        try { return found.getLong(bridge); }
+        catch (Throwable ignored) { return 0L; }
     }
 
     private static String firstString(Object[] args) {
