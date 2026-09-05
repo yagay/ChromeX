@@ -60,6 +60,13 @@ public final class ModuleMain extends XposedModule {
         } catch (Throwable ignored) {}
 
         ClassLoader loader = runtime.classLoader;
+
+        // Install the stable duplicate bridge interception for every split-ready build. When the
+        // overwrite option is enabled Config suppresses the older duplicate-accept hooks, so this
+        // hook owns the conflict decision and prevents Chromium from uniquifying to " (1)".
+        installFeature("same-name download overwrite", () ->
+                new OverwriteDownloadHooks(runtime, hooks, prefs).install());
+
         if (Chrome152.matches(runtime)) {
             hooks.info("verified exact-build profile selected: " + runtime.versionName);
             installFeature("Chrome 152 verified profile", () ->
@@ -80,7 +87,7 @@ public final class ModuleMain extends XposedModule {
                     new BannerHooks(this, hooks, prefs, loader).install());
             hooks.info("verified Chrome 145 profile active: " + runtime.versionName);
         } else {
-            // New or changed builds never touch release-specific short names or numeric J.N
+            // New or changed builds never touch release-specific R8 short names or numeric J.N
             // selectors. This includes point updates within Chrome 145/152 when their exact build
             // has not been verified.
             installFeature("adaptive Chrome hooks", () ->
