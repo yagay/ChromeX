@@ -16,11 +16,7 @@ import java.util.List;
 
 import io.github.libxposed.api.XposedModule;
 
-/**
- * Conservative hooks for Chrome builds without a verified release profile. This path deliberately
- * avoids release-specific R8 short names. Stable APIs are used directly and DexKit is used only
- * for distinctive structural lookups. Unsupported features fail independently.
- */
+/** Conservative structural hooks for Chrome builds without a verified exact profile. */
 final class AdaptiveChromeHooks {
     private final HookSupport hooks;
     private final SharedPreferences prefs;
@@ -59,8 +55,7 @@ final class AdaptiveChromeHooks {
                 }
             }
             if (candidates.size() != 1) {
-                hooks.warn("adaptive no-restore unresolved: bool(String) candidates="
-                        + candidates.size());
+                hooks.warn("adaptive no-restore unresolved: bool(String) candidates=" + candidates.size());
                 return;
             }
             hooks.method(candidates.get(0), "chromex:adaptive:no-restore", chain -> {
@@ -95,19 +90,27 @@ final class AdaptiveChromeHooks {
         hooks.exact(runtime.classLoader, Chrome145.ACTIVITY, "onDestroy", new Class<?>[0],
                 "chromex:adaptive:onDestroy", chain -> {
                     Object receiver = chain.getThisObject();
-                    if (receiver instanceof Activity && ((Activity) receiver).isFinishing()
-                            && Config.get(prefs, Config.CLEAR_CLOSED_TABS)) {
-                        captureModelsFromActivity((Activity) receiver);
-                        closeAllKnownTabs();
+                    if (receiver instanceof Activity) {
+                        Activity activity = (Activity) receiver;
+                        if (activity.isFinishing() && isChromeTabbedActivity(activity)
+                                && Config.get(prefs, Config.CLEAR_CLOSED_TABS)) {
+                            captureModelsFromActivity(activity);
+                            closeAllKnownTabs();
+                        }
                     }
                     return chain.proceed();
                 });
     }
 
-    /**
-     * Find the selector structurally instead of depending on fields such as O2 or classes such as
-     * k3r. A selector candidate must expose a unique (boolean) -> TabModel method.
-     */
+    private boolean isChromeTabbedActivity(Activity activity) {
+        try {
+            return Reflect.cls(runtime.classLoader, Chrome145.ACTIVITY).isInstance(activity);
+        } catch (Throwable ignored) {
+            return Chrome145.ACTIVITY.equals(activity.getClass().getName());
+        }
+    }
+
+    /** Find the selector structurally without depending on fields such as O2 or class k3r. */
     private void captureModelsFromActivity(Activity activity) {
         if (activity == null) return;
         try {
@@ -148,24 +151,13 @@ final class AdaptiveChromeHooks {
     }
 
     private Method findModelSelector(Class<?> type, Class<?> tabModelApi) {
-        Method found = null;
-        Class<?> c = type;
-        while (c != null && c != Object.class) {
-            for (Method method : c.getDeclaredMethods()) {
-                if (Modifier.isStatic(method.getModifiers())) continue;
-                Class<?>[] p = method.getParameterTypes();
-                if (p.length != 1 || p[0] != boolean.class) continue;
-                if (!tabModelApi.isAssignableFrom(method.getReturnType())) continue;
-                if (found != null) return null;
-                method.setAccessible(true);
-                found = method;
-            }
-            c = c.getSuperclass();
-        }
-        return found;
+        // Reflect.signature is override-aware: a method declared by the runtime subclass wins over
+        // an overridden method in its superclass instead of being misclassified as ambiguity.
+        return Reflect.signature(type, tabModelApi, boolean.class);
     }
 
     private void settleColdStart(Activity activity) {
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
         captureModelsFromActivity(activity);
         Object regular = regularModel();
         Object home = homepageGurl();
@@ -235,7 +227,6 @@ final class AdaptiveChromeHooks {
                 if (factory == null) return null;
                 owner = factory.invoke(null);
             }
-            // Structural resolver is (incognito, forZeroTabs) -> GURL.
             return getter.invoke(owner, false, false);
         } catch (Throwable t) {
             hooks.warn("adaptive homepage invocation failed: " + t.getClass().getSimpleName());
@@ -296,17 +287,12 @@ final class AdaptiveChromeHooks {
         try {
             Object value = Reflect.call(model, "getCount");
             return value instanceof Integer ? (Integer) value : 0;
-        } catch (Throwable ignored) {
-            return 0;
-        }
+        } catch (Throwable ignored) { return 0; }
     }
 
     private Object tabAt(Object model, int index) {
-        try {
-            return Reflect.call(model, "getTabAt", index);
-        } catch (Throwable ignored) {
-            return null;
-        }
+        try { return Reflect.call(model, "getTabAt", index); }
+        catch (Throwable ignored) { return null; }
     }
 
     private void closeTab(Object model, Object tab) {
@@ -341,9 +327,7 @@ final class AdaptiveChromeHooks {
         try {
             Object value = Reflect.get(gurl, "a");
             return value instanceof String ? (String) value : null;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        } catch (Throwable ignored) { return null; }
     }
 
     private boolean isNtp(String value) {
