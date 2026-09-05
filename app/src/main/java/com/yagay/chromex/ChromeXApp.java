@@ -48,7 +48,7 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
             @Override public void onActivityStarted(Activity activity) {}
             @Override public void onActivityResumed(Activity activity) {
                 foregroundActivity = new WeakReference<>(activity);
-                attachInstallerEntrySoon(activity);
+                attachPersistentEntriesSoon(activity);
             }
             @Override public void onActivityPaused(Activity activity) {}
             @Override public void onActivityStopped(Activity activity) {}
@@ -68,7 +68,7 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
         catch (Throwable ignored) {}
         for (Listener listener : LISTENERS) listener.onServiceChanged(value);
         Activity activity = foregroundActivity.get();
-        if (activity != null) attachInstallerEntrySoon(activity);
+        if (activity != null) attachPersistentEntriesSoon(activity);
     }
 
     @Override
@@ -76,12 +76,17 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
         if (service == value) service = null;
         for (Listener listener : LISTENERS) listener.onServiceChanged(service);
         Activity activity = foregroundActivity.get();
-        if (activity != null) attachInstallerEntrySoon(activity);
+        if (activity != null) attachPersistentEntriesSoon(activity);
     }
 
-    private void attachInstallerEntrySoon(Activity activity) {
-        main.post(() -> AluminiumInstallerEntry.attach(activity));
-        main.postDelayed(() -> AluminiumInstallerEntry.attach(activity), 350L);
+    private void attachPersistentEntriesSoon(Activity activity) {
+        main.post(() -> attachPersistentEntries(activity));
+        main.postDelayed(() -> attachPersistentEntries(activity), 350L);
+    }
+
+    private static void attachPersistentEntries(Activity activity) {
+        AluminiumInstallerEntry.attach(activity);
+        OverwriteConfirmationEntry.attach(activity);
     }
 
     private void grantDiagnosticAccess(Collection<String> packages) {
