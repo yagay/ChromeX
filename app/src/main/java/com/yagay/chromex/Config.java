@@ -2,6 +2,7 @@ package com.yagay.chromex;
 
 import android.content.SharedPreferences;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -40,7 +41,7 @@ public final class Config {
     public static final String AUTO_OPEN_AUDIO = "auto_open_audio";
     public static final String AUTO_OPEN_EBOOK = "auto_open_ebook";
 
-    /** Chromium-family packages explicitly selected from ChromeX's dynamic scope list. */
+    /** Browser packages explicitly selected from ChromeX or adopted from the real LSPosed scope. */
     public static final String DYNAMIC_TARGETS = "dynamic_chromium_targets";
 
     public static final String APK_TOAST = "apk_toast";
@@ -66,7 +67,21 @@ public final class Config {
     private Config() {}
 
     public static SharedPreferences fromService(XposedService service) {
-        return service == null ? null : service.getRemotePreferences(FILE);
+        if (service == null) return null;
+        SharedPreferences prefs = service.getRemotePreferences(FILE);
+        // A user may add an unknown browser directly from LSPosed instead of ChromeX. Adopt every
+        // non-built-in package already present in the real module scope so the runtime entry gate
+        // accepts it too. Chromium core-class validation still decides whether hooks are installed.
+        try {
+            ArrayList<String> adopted = new ArrayList<>();
+            for (String packageName : service.getScope()) {
+                if (packageName != null && !ChromiumTargets.isKnownPackage(packageName)) {
+                    adopted.add(packageName);
+                }
+            }
+            addDynamicTargets(prefs, adopted);
+        } catch (Throwable ignored) {}
+        return prefs;
     }
 
     public static SharedPreferences fromModule(XposedModule module) {
