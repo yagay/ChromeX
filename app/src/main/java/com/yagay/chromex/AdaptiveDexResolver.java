@@ -2,8 +2,6 @@ package com.yagay.chromex;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.LinkedHashSet;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -12,10 +10,11 @@ import org.luckypray.dexkit.query.FindMethod;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
 import org.luckypray.dexkit.result.MethodData;
 
-/** DexKit-backed structural resolver for unknown Chromium and vendor forks. */
+/** DexKit-backed semantic resolver for Chromium builds and vendor forks. */
 final class AdaptiveDexResolver {
     private static final String CACHE_ENGINE = "adaptive:engine-version";
     private static final String CACHE_HOMEPAGE = "adaptive:homepage";
+    private static final String CACHE_TAB_CREATOR = "adaptive:tab-creator";
     private static final String CACHE_NATIVE_PREFIX = "adaptive:native:";
     private static final Pattern ENGINE_VERSION = Pattern.compile("\\d{2,3}\\.\\d+\\.\\d+\\.\\d+");
     private static final ConcurrentHashMap<String, Method> MEMORY = new ConcurrentHashMap<>();
@@ -34,17 +33,19 @@ final class AdaptiveDexResolver {
                     String.class, new Class<?>[0]);
         }
         if (method == null && canScan(runtime, hooks)) {
-            try (DexKitBridge bridge = DexKitBridge.create(runtime.chromeSplitPath)) {
-                MethodData data = bridge.findMethod(FindMethod.create()
-                        .matcher(MethodMatcher.create()
-                                .name("getProductVersion")
-                                .returnType("java.lang.String")))
-                        .single();
-                Method candidate = data.getMethodInstance(runtime.classLoader);
-                if (candidate.getParameterCount() == 0) method = candidate;
-            } catch (Throwable t) {
-                hooks.warn("adaptive resolver: getProductVersion unavailable: "
-                        + t.getClass().getSimpleName());
+            for (String path : runtime.dexPaths()) {
+                try (DexKitBridge bridge = DexKitBridge.create(path)) {
+                    MethodData data = bridge.findMethod(FindMethod.create()
+                            .matcher(MethodMatcher.create()
+                                    .name("getProductVersion")
+                                    .returnType("java.lang.String")))
+                            .single();
+                    Method candidate = data.getMethodInstance(runtime.classLoader);
+                    if (candidate.getParameterCount() == 0) {
+                        method = candidate;
+                        break;
+                    }
+                } catch (Throwable ignored) {}
             }
         }
         if (method != null) {
@@ -53,11 +54,10 @@ final class AdaptiveDexResolver {
             String value = invokeStringNoArg(method);
             if (plausibleEngineVersion(value)) {
                 hooks.info("adaptive resolver: Chromium engine=" + value + " via "
-                        + method.getDeclaringClass().getName() + "#" + method.getName());
+                        + method.getDeclaringClass().getName() + '#' + method.getName());
                 return value;
             }
         }
-        // ChromiumProfile applies an APK/Dex literal fallback if this semantic method is absent.
         return runtime.versionName == null ? "unknown" : runtime.versionName;
     }
 
@@ -74,42 +74,56 @@ final class AdaptiveDexResolver {
         }
         if (!canScan(runtime, hooks)) return null;
 
+        // Public/stable semantic names win when a build keeps them.
         for (String name : new String[]{"getHomepageUrl", "getHomepageGurl", "getHomepageGURL"}) {
-            try (DexKitBridge bridge = DexKitBridge.create(runtime.chromeSplitPath)) {
-                MethodData data = bridge.findMethod(FindMethod.create()
-                        .matcher(MethodMatcher.create()
-                                .name(name)
-                                .returnType(Chrome145.GURL)))
-                        .single();
-                Method candidate = data.getMethodInstance(runtime.classLoader);
-                if (isHomepageGetter(candidate)) {
-                    method = candidate;
-                    break;
-                }
-            } catch (Throwable ignored) {}
+            method = scanNamedHomepage(runtime, name);
+            if (method != null) break;
         }
 
+        // Stock Chromium itself R8-obfuscates HomepageManager. Preference/trace strings survive and
+        // identify the owner much more reliably than short class names. Once an owner is found,
+        // choose its best GURL accessor by signature rather than using the anchor helper blindly.
         if (method == null) {
-            try (DexKitBridge bridge = DexKitBridge.create(runtime.chromeSplitPath)) {
-                MethodData data = bridge.findMethod(FindMethod.create()
-                        .matcher(MethodMatcher.create()
-                                .returnType(Chrome145.GURL)
-                                .usingStrings("chrome-native://newtab/")))
-                        .single();
-                Method candidate = data.getMethodInstance(runtime.classLoader);
-                if (isHomepageGetter(candidate)) method = candidate;
-                if (method == null) {
-                    Class<?> owner = candidate.getDeclaringClass();
-                    for (Method declared : owner.getDeclaredMethods()) {
-                        if (!isHomepageGetter(declared)) continue;
-                        if (method != null) {
-                            method = null;
-                            break;
+            outer:
+            for (String anchor : ChromiumSemanticAnchors.HOMEPAGE_STRINGS) {
+                for (String path : runtime.dexPaths()) {
+                    try (DexKitBridge bridge = DexKitBridge.create(path)) {
+                        MethodData data = bridge.findMethod(FindMethod.create()
+                                .matcher(MethodMatcher.create()
+                                        .returnType(Chrome145.GURL)
+                                        .usingStrings(anchor)))
+                                .single();
+                        Method candidate = data.getMethodInstance(runtime.classLoader);
+                        Method selected = bestHomepageGetter(candidate.getDeclaringClass());
+                        if (selected != null) {
+                            method = selected;
+                            hooks.info("adaptive resolver: homepage owner anchored by " + anchor
+                                    + " source=" + sourceLabel(runtime, path));
+                            break outer;
                         }
-                        method = declared;
-                    }
+                    } catch (Throwable ignored) {}
                 }
-            } catch (Throwable ignored) {}
+            }
+        }
+
+        // Very old/forked builds may only expose the NTP literal. It is intentionally last because
+        // modern Chromium has many unrelated NTP users and therefore this anchor is often ambiguous.
+        if (method == null) {
+            for (String path : runtime.dexPaths()) {
+                try (DexKitBridge bridge = DexKitBridge.create(path)) {
+                    MethodData data = bridge.findMethod(FindMethod.create()
+                            .matcher(MethodMatcher.create()
+                                    .returnType(Chrome145.GURL)
+                                    .usingStrings("chrome-native://newtab/")))
+                            .single();
+                    Method candidate = data.getMethodInstance(runtime.classLoader);
+                    Method selected = bestHomepageGetter(candidate.getDeclaringClass());
+                    if (selected != null) {
+                        method = selected;
+                        break;
+                    }
+                } catch (Throwable ignored) {}
+            }
         }
 
         if (method == null) {
@@ -121,6 +135,50 @@ final class AdaptiveDexResolver {
         ResolverCacheClient.put(runtime, CACHE_HOMEPAGE, encode(method));
         hooks.info("adaptive resolver: homepage=" + encode(method)
                 + " params=" + method.getParameterCount());
+        return method;
+    }
+
+    /** Resolve an R8-obfuscated ChromeTabCreator from Chromium TraceEvent strings + stable types. */
+    static Method resolveTabCreator(ChromeRuntime runtime, HookSupport hooks) {
+        if (runtime == null) return null;
+        Method method = memory(runtime, CACHE_TAB_CREATOR);
+        if (isTabCreator(method)) return method;
+
+        method = restoreByEncodedName(runtime, ResolverCacheClient.get(runtime, CACHE_TAB_CREATOR));
+        if (isTabCreator(method)) {
+            remember(runtime, CACHE_TAB_CREATOR, method);
+            hooks.info("adaptive resolver cache hit: tab creator=" + encode(method));
+            return method;
+        }
+        if (!canScan(runtime, hooks)) return null;
+
+        outer:
+        for (String anchor : ChromiumSemanticAnchors.TAB_CREATOR_STRINGS) {
+            for (String path : runtime.dexPaths()) {
+                try (DexKitBridge bridge = DexKitBridge.create(path)) {
+                    MethodData data = bridge.findMethod(FindMethod.create()
+                            .matcher(MethodMatcher.create()
+                                    .returnType(ChromiumSemanticAnchors.TAB)
+                                    .usingStrings(anchor)))
+                            .single();
+                    Method candidate = data.getMethodInstance(runtime.classLoader);
+                    Method selected = isTabCreator(candidate)
+                            ? candidate : bestTabCreator(candidate.getDeclaringClass());
+                    if (selected != null) {
+                        method = selected;
+                        hooks.info("adaptive resolver: tab creator anchored by " + anchor
+                                + " -> " + encode(method)
+                                + " source=" + sourceLabel(runtime, path));
+                        break outer;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        if (method == null) return null;
+        try { method.setAccessible(true); } catch (Throwable ignored) {}
+        remember(runtime, CACHE_TAB_CREATOR, method);
+        ResolverCacheClient.put(runtime, CACHE_TAB_CREATOR, encode(method));
         return method;
     }
 
@@ -138,7 +196,7 @@ final class AdaptiveDexResolver {
         if (!loadNative(hooks)) return null;
 
         Throwable last = null;
-        for (String dexPath : semanticDexPaths(runtime)) {
+        for (String dexPath : runtime.dexPaths()) {
             try (DexKitBridge bridge = DexKitBridge.create(dexPath)) {
                 MethodData data = bridge.findMethod(FindMethod.create()
                         .matcher(MethodMatcher.create().name(semanticName).returnType("void")))
@@ -181,30 +239,61 @@ final class AdaptiveDexResolver {
         catch (Throwable ignored) { return null; }
     }
 
-    private static Set<String> semanticDexPaths(ChromeRuntime runtime) {
-        LinkedHashSet<String> paths = new LinkedHashSet<>();
-        if (runtime == null) return paths;
-        if (runtime.chromeSplitPath != null && !runtime.chromeSplitPath.isBlank()) {
-            paths.add(runtime.chromeSplitPath);
+    private static Method scanNamedHomepage(ChromeRuntime runtime, String name) {
+        for (String path : runtime.dexPaths()) {
+            try (DexKitBridge bridge = DexKitBridge.create(path)) {
+                MethodData data = bridge.findMethod(FindMethod.create()
+                        .matcher(MethodMatcher.create().name(name).returnType(Chrome145.GURL)))
+                        .single();
+                Method candidate = data.getMethodInstance(runtime.classLoader);
+                if (isHomepageGetter(candidate)) return candidate;
+            } catch (Throwable ignored) {}
         }
-        try {
-            if (runtime.applicationInfo != null && runtime.applicationInfo.sourceDir != null) {
-                paths.add(runtime.applicationInfo.sourceDir);
+        return null;
+    }
+
+    private static Method bestHomepageGetter(Class<?> owner) {
+        if (owner == null) return null;
+        Method best = null;
+        int bestScore = Integer.MIN_VALUE;
+        boolean tied = false;
+        for (Method candidate : owner.getDeclaredMethods()) {
+            if (!isHomepageGetter(candidate)) continue;
+            String low = candidate.getName().toLowerCase(java.util.Locale.ROOT);
+            int score = 0;
+            if (low.contains("homepage")) score += 100;
+            Class<?>[] p = candidate.getParameterTypes();
+            if (p.length == 1) score += 80;
+            else if (p.length == 2) score += 70;
+            else if (p.length == 0) score += 50;
+            if (!Modifier.isStatic(candidate.getModifiers())) score += 5;
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+                tied = false;
+            } else if (score == bestScore) {
+                tied = true;
             }
-        } catch (Throwable ignored) {}
-        try {
-            if (runtime.applicationInfo != null && runtime.applicationInfo.splitSourceDirs != null) {
-                for (String path : runtime.applicationInfo.splitSourceDirs) {
-                    if (path != null && !path.isBlank()) paths.add(path);
-                }
-            }
-        } catch (Throwable ignored) {}
-        return paths;
+        }
+        if (best == null || tied) return null;
+        try { best.setAccessible(true); } catch (Throwable ignored) {}
+        return best;
+    }
+
+    private static Method bestTabCreator(Class<?> owner) {
+        if (owner == null) return null;
+        Method found = null;
+        for (Method candidate : owner.getDeclaredMethods()) {
+            if (!isTabCreator(candidate)) continue;
+            if (found != null) return null;
+            found = candidate;
+        }
+        if (found != null) try { found.setAccessible(true); } catch (Throwable ignored) {}
+        return found;
     }
 
     private static String sourceLabel(ChromeRuntime runtime, String path) {
-        if (runtime != null && runtime.chromeSplitPath != null
-                && runtime.chromeSplitPath.equals(path)) return "chrome-split";
+        if (runtime != null && path != null && path.equals(runtime.primaryDexPath())) return "primary";
         try {
             if (runtime != null && runtime.applicationInfo != null
                     && path.equals(runtime.applicationInfo.sourceDir)) return "base-apk";
@@ -273,6 +362,14 @@ final class AdaptiveDexResolver {
         return true;
     }
 
+    private static boolean isTabCreator(Method method) {
+        if (method == null || Modifier.isStatic(method.getModifiers())
+                || Modifier.isAbstract(method.getModifiers())) return false;
+        if (!ChromiumSemanticAnchors.TAB.equals(method.getReturnType().getName())) return false;
+        Class<?>[] p = method.getParameterTypes();
+        return p.length > 0 && ChromiumSemanticAnchors.LOAD_URL_PARAMS.equals(p[0].getName());
+    }
+
     private static String invokeStringNoArg(Method method) {
         if (method == null || method.getParameterCount() != 0) return null;
         try {
@@ -286,19 +383,19 @@ final class AdaptiveDexResolver {
     }
 
     private static Method memory(ChromeRuntime runtime, String key) {
-        return MEMORY.get(runtime.resolverCacheKey() + ":" + key);
+        return MEMORY.get(runtime.resolverCacheKey() + ':' + key);
     }
 
     private static void remember(ChromeRuntime runtime, String key, Method method) {
-        if (method != null) MEMORY.put(runtime.resolverCacheKey() + ":" + key, method);
+        if (method != null) MEMORY.put(runtime.resolverCacheKey() + ':' + key, method);
     }
 
     private static String encode(Method method) {
-        return method.getDeclaringClass().getName() + "#" + method.getName();
+        return method.getDeclaringClass().getName() + '#' + method.getName();
     }
 
     private static boolean canScan(ChromeRuntime runtime, HookSupport hooks) {
-        return runtime != null && runtime.chromeSplitPath != null && loadNative(hooks);
+        return runtime != null && !runtime.dexPaths().isEmpty() && loadNative(hooks);
     }
 
     private static boolean loadNative(HookSupport hooks) {
