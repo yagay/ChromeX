@@ -466,9 +466,20 @@ final class UniversalDownloadHooks {
             return "下载文件";
         }
 
+        /**
+         * Source and legacy callbacks for one completed download must collapse to the same key.
+         * Prefer normalized file identity; ContentId is only the fallback when no file metadata is
+         * available yet.
+         */
         String key() {
+            if (path != null && !path.isBlank()) {
+                return "file:" + path + '|' + String.valueOf(mime);
+            }
+            if (name != null && !name.isBlank()) {
+                return "name:" + name + '|' + String.valueOf(mime);
+            }
             if (contentKey != null && !contentKey.isBlank()) return "content:" + contentKey;
-            return String.valueOf(path) + '|' + String.valueOf(name) + '|' + String.valueOf(mime);
+            return "unknown:" + String.valueOf(mime);
         }
     }
 
