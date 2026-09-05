@@ -13,6 +13,10 @@ import java.nio.file.StandardCopyOption;
  * commit a uniquified "name (n).ext" file. When overwrite is enabled, replace the old logical
  * target with the newly completed file and publish the path normalization so history/UI bindings
  * can rewrite their metadata too.
+ *
+ * <p>Normalization deliberately runs before the original completion callback. Some Chromium forks
+ * auto-open APKs from inside that callback; running afterwards can hand the installer the stale
+ * pre-existing file while the newly downloaded numbered file is only normalized a moment later.</p>
  */
 final class CompletionNameNormalizerHooks {
     private final ChromiumProfile profile;
@@ -45,11 +49,10 @@ final class CompletionNameNormalizerHooks {
         hooks.all(runtime.classLoader, owner, "onDownloadCompleted",
                 "chromex:completion-name-normalizer:" + id, chain -> {
                     Object info = DownloadInfoAccessor.find(chain.getArgs().toArray(), runtime.classLoader);
-                    Object result = chain.proceed();
                     if (Config.get(prefs, Config.OVERWRITE_DUPLICATE) && info != null) {
                         normalize(info);
                     }
-                    return result;
+                    return chain.proceed();
                 });
     }
 
@@ -67,12 +70,21 @@ final class CompletionNameNormalizerHooks {
             File desired = new File(parent, originalName).getCanonicalFile();
             if (!isSafeSameDirectory(actual, desired)) return;
 
-            replace(actual, desired);
+            long completedSize = actual.length();
+            long completedModified = actual.lastModified();
+            if (completedSize <= 0L) {
+                hooks.warn("completion numbered-name normalization skipped empty source: "
+                        + actual.getAbsolutePath());
+                return;
+            }
+
+            replace(actual, desired, completedSize);
             DownloadNormalizationRegistry.register(actual, desired);
             boolean metadataChanged = DownloadInfoAccessor.rewrite(info, profile, desired);
             refreshMedia(actual, desired);
-            hooks.info("completion numbered name normalized: " + actual.getName()
-                    + " -> " + desired.getName() + " metadataChanged=" + metadataChanged);
+            hooks.info("completion numbered name normalized before callback: " + actual.getName()
+                    + " -> " + desired.getName() + " size=" + completedSize
+                    + " mtime=" + completedModified + " metadataChanged=" + metadataChanged);
         } catch (Throwable t) {
             hooks.warn("completion numbered-name normalization failed: "
                     + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage()));
@@ -103,14 +115,14 @@ final class CompletionNameNormalizerHooks {
         }
     }
 
-    private static void replace(File actual, File desired) throws Exception {
+    private static void replace(File actual, File desired, long expectedSize) throws Exception {
         try {
             Files.move(actual.toPath(), desired.toPath(),
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException ignored) {
             Files.move(actual.toPath(), desired.toPath(), StandardCopyOption.REPLACE_EXISTING);
         }
-        if (!desired.isFile() || actual.exists()) {
+        if (!desired.isFile() || actual.exists() || desired.length() != expectedSize) {
             throw new IllegalStateException("post-move verification failed");
         }
     }
