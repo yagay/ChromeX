@@ -1,6 +1,7 @@
 package com.yagay.chromex;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 
 import org.luckypray.dexkit.DexKitBridge;
 import org.luckypray.dexkit.query.FindMethod;
@@ -18,26 +19,58 @@ final class DexKitResolver {
 
     static Method resolveHomepageGetter(ChromeRuntime runtime, HookSupport hooks) {
         if (runtime == null) return null;
+
+        // HomepageManager's public/internal resolver is structurally (boolean, boolean) -> GURL.
+        // A previous implementation cached the private/static one-boolean NTP helper because it
+        // contains "chrome-native://newtab/". Restore only the two-boolean resolver so that stale
+        // caches automatically miss and are rebuilt.
         Method cached = restore(runtime, ResolverCacheClient.get(runtime, CACHE_HOMEPAGE),
-                new Class<?>[]{boolean.class}, Chrome145.GURL);
-        if (cached != null) {
+                new Class<?>[]{boolean.class, boolean.class}, Chrome145.GURL);
+        if (cached != null && !Modifier.isStatic(cached.getModifiers())) {
             hooks.info("resolver cache hit: homepage="
                     + cached.getDeclaringClass().getName() + "#" + cached.getName());
             return cached;
         }
         if (runtime.chromeSplitPath == null || !loadNative(hooks)) return null;
+
         try (DexKitBridge bridge = DexKitBridge.create(runtime.chromeSplitPath)) {
-            MethodData data = bridge.findMethod(FindMethod.create()
+            // First locate the NTP helper only as a semantic anchor for HomepageManager's owner.
+            // In Chrome 152 this is w5c.e(boolean), while the actual homepage resolver is the
+            // non-static w5c.b(boolean, boolean). R8 may rename both in later builds.
+            MethodData ntpHelper = bridge.findMethod(FindMethod.create()
                     .matcher(MethodMatcher.create()
                             .paramTypes("boolean")
                             .returnType(Chrome145.GURL)
                             .usingStrings("chrome-native://newtab/")))
                     .single();
-            Method method = data.getMethodInstance(runtime.classLoader);
-            ResolverCacheClient.put(runtime, CACHE_HOMEPAGE, encode(method));
+            Method anchor = ntpHelper.getMethodInstance(runtime.classLoader);
+            Class<?> owner = anchor.getDeclaringClass();
+
+            Method resolved = null;
+            for (Method method : owner.getDeclaredMethods()) {
+                if (Modifier.isStatic(method.getModifiers())) continue;
+                if (!Chrome145.GURL.equals(method.getReturnType().getName())) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 2 || params[0] != boolean.class
+                        || params[1] != boolean.class) continue;
+                if (resolved != null) {
+                    hooks.warn("resolver: homepage owner has ambiguous two-boolean GURL methods: "
+                            + owner.getName());
+                    return null;
+                }
+                method.setAccessible(true);
+                resolved = method;
+            }
+            if (resolved == null) {
+                hooks.warn("resolver: homepage owner found but resolver signature missing: "
+                        + owner.getName());
+                return null;
+            }
+
+            ResolverCacheClient.put(runtime, CACHE_HOMEPAGE, encode(resolved));
             hooks.info("resolver scan: homepage="
-                    + method.getDeclaringClass().getName() + "#" + method.getName());
-            return method;
+                    + resolved.getDeclaringClass().getName() + "#" + resolved.getName());
+            return resolved;
         } catch (Throwable t) {
             hooks.warn("resolver: homepage getter not uniquely resolved: "
                     + t.getClass().getSimpleName());
