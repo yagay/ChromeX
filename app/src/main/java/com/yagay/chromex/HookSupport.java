@@ -4,6 +4,7 @@ import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.List;
 
 import io.github.libxposed.api.XposedInterface;
@@ -65,6 +66,11 @@ final class HookSupport {
     }
 
     private void install(Method method, String id, Interceptor interceptor) {
+        if (Modifier.isAbstract(method.getModifiers())) {
+            warn("skip abstract hook " + id + " -> "
+                    + method.getDeclaringClass().getName() + "#" + method.getName());
+            return;
+        }
         module.hook(method)
                 .setId(id)
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
