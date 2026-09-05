@@ -10,17 +10,42 @@ import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-/** Fallback Chromium product-version scanner for vendor APK/split layouts. */
+/** Fallback Chromium product-version scanner for single APK and arbitrary split layouts. */
 final class ChromiumEngineVersionScanner {
     private static final Pattern VERSION = Pattern.compile("\\d{2,3}\\.\\d+\\.\\d+\\.\\d+");
 
     private ChromiumEngineVersionScanner() {}
 
     static String scan(ChromeRuntime runtime, HookSupport hooks) {
-        if (runtime == null || runtime.chromeSplitPath == null) return null;
-        File file = new File(runtime.chromeSplitPath);
-        if (!file.isFile()) return null;
+        if (runtime == null || runtime.dexPaths().isEmpty()) return null;
+        String best = null;
+        String bestSource = null;
+        Throwable last = null;
+        for (String path : runtime.dexPaths()) {
+            if (path == null || path.isBlank()) continue;
+            File file = new File(path);
+            if (!file.isFile()) continue;
+            try {
+                String candidate = scanFile(file);
+                if (candidate != null && (best == null || compare(candidate, best) > 0)) {
+                    best = candidate;
+                    bestSource = file.getName();
+                }
+            } catch (Throwable t) {
+                last = t;
+            }
+        }
 
+        if (best != null && hooks != null) {
+            hooks.info("adaptive resolver: Chromium engine=" + best
+                    + " via dex literal source=" + bestSource);
+        } else if (best == null && last != null && hooks != null) {
+            hooks.warn("adaptive engine dex scan failed: " + last.getClass().getSimpleName());
+        }
+        return best;
+    }
+
+    private static String scanFile(File file) throws Exception {
         String best = null;
         try (ZipFile zip = new ZipFile(file)) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
@@ -36,21 +61,13 @@ final class ChromiumEngineVersionScanner {
                     }
                 }
             }
-        } catch (Throwable zipFailure) {
-            // Some test/custom runtimes can point directly at a dex file rather than an APK.
+            return best;
+        } catch (java.util.zip.ZipException notZip) {
+            // Custom/test runtimes may point directly at a dex file.
             try (FileInputStream in = new FileInputStream(file)) {
-                best = bestInBytes(IoCompat.readFully(in));
-            } catch (Throwable ignored) {
-                if (hooks != null) hooks.warn("adaptive engine dex scan failed: "
-                        + zipFailure.getClass().getSimpleName());
+                return bestInBytes(IoCompat.readFully(in));
             }
         }
-
-        if (best != null && hooks != null) {
-            hooks.info("adaptive resolver: Chromium engine=" + best
-                    + " via split APK dex literal");
-        }
-        return best;
     }
 
     static String bestInBytes(byte[] bytes) {
@@ -73,7 +90,6 @@ final class ChromiumEngineVersionScanner {
         try {
             int major = Integer.parseInt(p[0]);
             int build = Integer.parseInt(p[2]);
-            // Filters loopback literals such as 127.0.0.1 while retaining Chromium-style builds.
             return major >= 60 && major <= 250 && build >= 1000;
         } catch (Throwable ignored) {
             return false;
