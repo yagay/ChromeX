@@ -16,6 +16,9 @@ public final class ModuleMain extends XposedModule {
     public void onModuleLoaded(ModuleLoadedParam param) {
         processName = param.getProcessName();
         log(Log.INFO, "ChromeX", "module loaded in " + processName
+                + ", build=" + BuildConfig.VERSION_NAME
+                + " run=" + BuildConfig.BUILD_RUN
+                + " sha=" + BuildConfig.BUILD_SHA
                 + ", framework=" + getFrameworkName() + " " + getFrameworkVersion()
                 + ", api=" + getApiVersion());
     }
