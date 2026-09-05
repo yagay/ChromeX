@@ -7,7 +7,7 @@ import java.io.File;
 import java.util.Collections;
 import java.util.List;
 
-/** Compatibility backend for stock Chromium/Chrome builds without native Extension Core. */
+/** Compatibility backend for stock Chromium/Chrome or FULL builds whose Java bridge is unknown. */
 public final class LiteExtensionBackend implements ExtensionBackend {
     private final ExtensionCapabilityReport report;
 
@@ -22,7 +22,7 @@ public final class LiteExtensionBackend implements ExtensionBackend {
 
     @Override
     public boolean isAvailable() {
-        return report != null && report.mode == ExtensionRuntimeMode.LITE && context() != null;
+        return report != null && report.mode != ExtensionRuntimeMode.NONE && context() != null;
     }
 
     @Override
@@ -46,6 +46,7 @@ public final class LiteExtensionBackend implements ExtensionBackend {
     @Override
     public String diagnostics() {
         return "LITE backend selected\navailable=" + isAvailable()
+                + "\nsourceMode=" + (report == null ? "unknown" : report.mode)
                 + "\ninstalled=" + getInstalledExtensionIds().size() + "\n"
                 + "supported=CRX2/CRX3/ZIP install,content_scripts(js/css),matches,exclude_matches,"
                 + "chrome.runtime.id,chrome.storage.local(polyfill),uninstall\n"
