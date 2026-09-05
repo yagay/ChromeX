@@ -23,12 +23,10 @@ final class EngineVersionDexResolver {
                                 .returnType("java.lang.String")))
                         .single();
                 Method method = data.getMethodInstance(runtime.classLoader);
-                if (method.getParameterCount() != 0) continue;
+                if (method.getParameterCount() != 0
+                        || !Modifier.isStatic(method.getModifiers())) continue;
                 try { method.setAccessible(true); } catch (Throwable ignored) {}
-                Object owner = Modifier.isStatic(method.getModifiers()) ? null
-                        : AdaptiveDexResolver.singletonOwner(method.getDeclaringClass());
-                if (!Modifier.isStatic(method.getModifiers()) && owner == null) continue;
-                Object value = method.invoke(owner);
+                Object value = method.invoke(null);
                 if (value instanceof String
                         && ChromiumEngineVersionScanner.plausible((String) value)) {
                     if (hooks != null) hooks.info("Chromium engine version bound from semantic DEX: "
