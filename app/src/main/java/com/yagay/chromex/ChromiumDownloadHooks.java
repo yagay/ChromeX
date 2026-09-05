@@ -20,9 +20,13 @@ final class ChromiumDownloadHooks {
     void install() {
         if (profile.isVerifiedExact()) {
             new ChromiumDownloadDialogs(profile, runtime.classLoader, hooks, prefs).install();
+            new ChromiumDownloadCompletionHooks(profile, runtime, hooks, prefs).install();
         } else {
-            new AdaptiveDownloadDialogs(runtime, hooks, prefs).install();
+            // Vendor forks frequently keep semantic Chromium entry points but obfuscate the owner
+            // classes/fields. Route them through the structural resolver instead of Chrome-specific
+            // fallback selectors or DownloadInfo field names.
+            new AdaptiveDownloadDialogsV2(runtime, hooks, prefs).install();
+            new AdaptiveDownloadCompletionHooks(profile, runtime, hooks, prefs).install();
         }
-        new ChromiumDownloadCompletionHooks(profile, runtime, hooks, prefs).install();
     }
 }
