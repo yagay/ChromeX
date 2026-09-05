@@ -10,10 +10,7 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Process;
 
-/**
- * Cross-UID transport owned by ChromeX. It receives diagnostics from Chrome and also stores small
- * resolver-cache records so future Chrome builds only need a DexKit scan once per installed build.
- */
+/** Cross-UID diagnostics and resolver-cache transport owned by ChromeX. */
 public final class DiagnosticProvider extends ContentProvider {
     static final String AUTHORITY = "com.yagay.chromex.diagnostics";
     static final Uri URI = Uri.parse("content://" + AUTHORITY + "/write");
@@ -35,12 +32,11 @@ public final class DiagnosticProvider extends ContentProvider {
     private static final String CACHE_PREFIX = "resolver:";
     private static final int MAX_SESSION_CHARS = 24_000;
     private static final int MAX_HOOK_CHARS = 120_000;
+    private static final int MAX_EVENT_CHARS = 80_000;
     private static final Object LOCK = new Object();
 
     @Override
-    public boolean onCreate() {
-        return true;
-    }
+    public boolean onCreate() { return true; }
 
     static SharedPreferences store(Context context) {
         return context.getSharedPreferences(STORE_FILE, Context.MODE_PRIVATE);
@@ -49,9 +45,8 @@ public final class DiagnosticProvider extends ContentProvider {
     static void clearStore(Context context) {
         if (context == null) return;
         synchronized (LOCK) {
-            SharedPreferences prefs = store(context);
-            SharedPreferences.Editor editor = prefs.edit();
-            editor.remove(Diagnostics.KEY_SESSION)
+            store(context).edit()
+                    .remove(Diagnostics.KEY_SESSION)
                     .remove(Diagnostics.KEY_SCAN_REPORT)
                     .remove(Diagnostics.KEY_HOOK_REPORT)
                     .remove(Diagnostics.KEY_HIT_REPORT)
@@ -91,16 +86,22 @@ public final class DiagnosticProvider extends ContentProvider {
                     prefs.edit().putString(Diagnostics.KEY_HIT_REPORT, text).apply();
                     break;
                 case KIND_EVENTS:
-                    prefs.edit().putString(Diagnostics.KEY_EVENT_REPORT, text).apply();
+                    // RuntimeDiagnostics sends a full cumulative event report. The legacy deep
+                    // scanner only emits a short SCAN completion/failure report after KIND_SCAN;
+                    // append that small report instead of replacing the useful runtime history.
+                    if (isDeepScanEvent(text)) {
+                        append(prefs, Diagnostics.KEY_EVENT_REPORT,
+                                "[deep-scan]\n" + text, MAX_EVENT_CHARS);
+                    } else {
+                        prefs.edit().putString(Diagnostics.KEY_EVENT_REPORT,
+                                trimTail(text, MAX_EVENT_CHARS)).apply();
+                    }
                     break;
                 case KIND_SCAN:
                     prefs.edit()
                             .putString(Diagnostics.KEY_SCAN_REPORT, text)
                             .putLong(Diagnostics.KEY_LAST_SCAN, time)
                             .apply();
-                    // "重新定位 Hook 点" is a one-shot operation. RemotePreferences inside Chrome
-                    // are read-only, so the ChromeX-owned provider flips the real setting back off
-                    // once the scan result has been received.
                     try {
                         context.getSharedPreferences(Config.FILE, Context.MODE_PRIVATE)
                                 .edit().putBoolean(Config.DIAGNOSTIC_MODE, false).apply();
@@ -111,6 +112,12 @@ public final class DiagnosticProvider extends ContentProvider {
             }
         }
         return Uri.withAppendedPath(URI, Long.toString(time));
+    }
+
+    private static boolean isDeepScanEvent(String text) {
+        if (text == null) return false;
+        return text.contains(" SCAN completed, chars=")
+                || text.contains(" SCAN fatal:");
     }
 
     private Uri putCache(Context context, ContentValues values) {
@@ -149,11 +156,14 @@ public final class DiagnosticProvider extends ContentProvider {
         String old = prefs.getString(key, "");
         if (old == null) old = "";
         String next = old + line + (line.endsWith("\n") ? "" : "\n");
-        if (next.length() > maxChars) {
-            next = "... older diagnostic lines trimmed ...\n"
-                    + next.substring(next.length() - maxChars);
-        }
-        prefs.edit().putString(key, next).apply();
+        prefs.edit().putString(key, trimTail(next, maxChars)).apply();
+    }
+
+    private static String trimTail(String value, int maxChars) {
+        if (value == null) return "";
+        if (value.length() <= maxChars) return value;
+        return "... older diagnostic lines trimmed ...\n"
+                + value.substring(value.length() - maxChars);
     }
 
     private boolean callerAllowed() {
@@ -177,9 +187,7 @@ public final class DiagnosticProvider extends ContentProvider {
     }
 
     @Override
-    public int delete(Uri uri, String selection, String[] selectionArgs) {
-        return 0;
-    }
+    public int delete(Uri uri, String selection, String[] selectionArgs) { return 0; }
 
     @Override
     public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
