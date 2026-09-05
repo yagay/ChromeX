@@ -6,8 +6,6 @@ import android.util.Log;
 import io.github.libxposed.api.XposedModule;
 
 public final class ModuleMain extends XposedModule {
-    private static final String VERIFIED_CHROME145 = "145.0.7632.218";
-
     private SharedPreferences prefs;
     private HookSupport hooks;
     private String processName = "unknown";
@@ -39,50 +37,43 @@ public final class ModuleMain extends XposedModule {
         RuntimeDiagnostics.beginSession(processName, getApiVersion(),
                 getFrameworkName(), getFrameworkVersion());
 
-        installFeature("Chrome split bootstrap", () ->
+        installFeature("Chromium split bootstrap", () ->
                 new ChromeBootstrap(this, hooks, prefs, param.getClassLoader(),
                         param.getApplicationInfo(), this::installForRuntime).install());
     }
 
     private void installForRuntime(ChromeRuntime runtime) {
         RuntimeDiagnostics.flushPendingIfPossible();
-        ClassLoader loader = runtime.classLoader;
+        ChromiumProfile profile = ChromiumProfile.detect(runtime);
 
+        // Stable download services are independent of the exact Chromium profile.
         installFeature("same-name download overwrite", () ->
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install());
         installFeature("download history rewrite", () ->
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install());
 
-        if (Chrome152.matches(runtime)) {
-            hooks.info("verified exact-build profile selected: " + runtime.versionName);
-            installFeature("Chrome 152 tabs/homepage", () ->
-                    new Chrome152TabsHooks(loader, hooks, prefs).install());
-            installFeature("Chrome 152 downloads", () ->
-                    new Chrome152DownloadHooks(loader, hooks, prefs).install());
-            hooks.info("Chrome 152 consolidated profile active: " + runtime.versionName);
-        } else if (VERIFIED_CHROME145.equals(runtime.versionName)) {
-            installFeature("Chrome 145 tabs/homepage", () ->
-                    new Chrome145TabsHooks(hooks, prefs, loader).install());
-            installFeature("Chrome 145 download dialog hooks", () ->
-                    new DownloadDialogHooks(this, hooks, prefs, loader).install());
-            installFeature("Chrome 145 installer hooks", () ->
-                    new InstallerHooks(this, hooks, prefs, loader).install());
-            installFeature("Chrome 145 banner hooks", () ->
-                    new BannerHooks(this, hooks, prefs, loader).install());
-            hooks.info("verified Chrome 145 profile active: " + runtime.versionName);
+        if (profile != null) {
+            hooks.info("verified Chromium profile selected: " + profile.label()
+                    + " " + runtime.versionName);
+            installFeature("Chromium tabs/homepage", () ->
+                    new ChromiumTabsHooks(profile, runtime.classLoader, hooks, prefs).install());
+            installFeature("Chromium downloads", () ->
+                    new ChromiumDownloadHooks(profile, runtime, this, hooks, prefs).install());
+            hooks.info("shared Chromium feature profile active: " + profile.family);
         } else {
-            installFeature("adaptive Chrome hooks", () ->
+            hooks.info("no verified exact profile; enabling structural capability fallbacks");
+            installFeature("adaptive Chromium hooks", () ->
                     new AdaptiveChromeHooks(this, hooks, prefs, runtime).install());
-            installFeature("adaptive download dialogs", () ->
+            installFeature("adaptive Chromium download dialogs", () ->
                     new AdaptiveDownloadDialogs(runtime, hooks, prefs).install());
         }
 
         try {
-            Diagnostics.scheduleScan(prefs, loader);
+            Diagnostics.scheduleScan(prefs, runtime.classLoader);
         } catch (Throwable t) {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
-        hooks.info("ChromeX feature hooks installed after chrome split ready");
+        hooks.info("ChromeX feature hooks installed after Chromium split ready");
     }
 
     private void installFeature(String name, Runnable installer) {
