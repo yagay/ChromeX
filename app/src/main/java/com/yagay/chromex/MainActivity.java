@@ -59,6 +59,9 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView desc = new TextView(this);
         desc.setText("Chrome 自适应兼容 · Split-ready · DexKit resolver · libxposed API 102\n"
+                + "ChromeX: " + BuildConfig.VERSION_NAME
+                + " · run " + BuildConfig.BUILD_RUN
+                + " · " + BuildConfig.BUILD_SHA + "\n"
                 + "已安装 Chrome: " + installedChromeVersion());
         desc.setTextSize(14f);
         desc.setPadding(0, dp(4), 0, dp(12));
