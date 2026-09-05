@@ -176,7 +176,7 @@ final class ChromiumCapabilityResolver {
                     "standard history callbacks absent; vendor/new backend possible");
         }
 
-        Method offline = findOfflineMaterializer();
+        Method offline = DownloadOfflineItemBinding.resolve(loader);
         if (offline != null) {
             out.available(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI,
                     "createOfflineItem".equals(offline.getName()) ? sourceForStable()
@@ -189,7 +189,12 @@ final class ChromiumCapabilityResolver {
                     "OfflineItem materializer unresolved");
         }
 
-        if (hasMethod(Chrome145.DOWNLOAD_MANAGER_SERVICE, "renameDownload")) {
+        if (hasClass(ChromiumSemanticAnchors.OFFLINE_CONTENT_AGGREGATOR_BRIDGE)
+                && hasClass("org.chromium.base.Callback") && offline != null) {
+            out.available(BrowserCapabilities.Key.DOWNLOAD_RENAME,
+                    BrowserCapabilities.Source.STRUCTURAL, 90,
+                    "OfflineContentAggregatorBridge source-of-truth rename candidate");
+        } else if (hasMethod(Chrome145.DOWNLOAD_MANAGER_SERVICE, "renameDownload")) {
             out.available(BrowserCapabilities.Key.DOWNLOAD_RENAME,
                     sourceForStable(), confidenceForStable(),
                     "legacy DownloadManagerService#renameDownload record backend");
@@ -225,25 +230,6 @@ final class ChromiumCapabilityResolver {
                     sourceForStable(), confidenceForStable(), Chrome145.TRANSLATE_MESSAGE);
         } else {
             out.unavailable(BrowserCapabilities.Key.TRANSLATE_MESSAGE, "TranslateMessage absent");
-        }
-    }
-
-    private Method findOfflineMaterializer() {
-        try {
-            Class<?> item = Reflect.cls(loader, ChromiumSemanticAnchors.DOWNLOAD_ITEM);
-            Class<?> offline = Reflect.cls(loader, ChromiumSemanticAnchors.OFFLINE_ITEM);
-            Method found = null;
-            for (Method method : item.getDeclaredMethods()) {
-                if (!Modifier.isStatic(method.getModifiers()) || method.getReturnType() != offline) continue;
-                Class<?>[] p = method.getParameterTypes();
-                if (p.length != 1 || p[0] != item) continue;
-                if (found != null) return null;
-                try { method.setAccessible(true); } catch (Throwable ignored) {}
-                found = method;
-            }
-            return found;
-        } catch (Throwable ignored) {
-            return null;
         }
     }
 
