@@ -17,10 +17,21 @@ jobs:
           cache: gradle
       - name: Prepare Gradle wrapper
         run: chmod +x gradlew
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+      - name: Android lint
+        run: ./gradlew :app:lintDebug --stacktrace
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
+      - name: Validate minified release
+        run: ./gradlew :app:assembleRelease --stacktrace
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: ChromeX-debug
           path: app/build/outputs/apk/debug/*.apk
+      - name: Upload unsigned release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChromeX-release-unsigned
+          path: app/build/outputs/apk/release/*.apk
