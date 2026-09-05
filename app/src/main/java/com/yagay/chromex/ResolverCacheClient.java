@@ -16,7 +16,10 @@ final class ResolverCacheClient {
             Uri uri = Uri.withAppendedPath(DiagnosticProvider.CACHE_URI, key);
             cursor = runtime.application.getContentResolver().query(uri,
                     new String[]{DiagnosticProvider.COL_VALUE}, null, null, null);
-            if (cursor != null && cursor.moveToFirst()) return cursor.getString(0);
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(DiagnosticProvider.COL_VALUE);
+                if (index >= 0) return cursor.getString(index);
+            }
         } catch (Throwable ignored) {
         } finally {
             if (cursor != null) cursor.close();
