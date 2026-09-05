@@ -38,4 +38,28 @@ final class DownloadNamePolicy {
         }
         return true;
     }
+
+    /**
+     * Returns the original basename for Chromium's "name (n).ext" conflict format.
+     * Returns null when the supplied name is not an exact Chromium-style uniquified name.
+     */
+    static String originalNameFromUniquified(String got) {
+        if (got == null || got.isBlank()) return null;
+
+        int dot = got.lastIndexOf('.');
+        String ext = dot > 0 ? got.substring(dot) : "";
+        String stem = dot > 0 ? got.substring(0, dot) : got;
+        if (!stem.endsWith(")")) return null;
+
+        int open = stem.lastIndexOf(" (");
+        if (open <= 0 || open + 2 >= stem.length() - 1) return null;
+        String number = stem.substring(open + 2, stem.length() - 1);
+        if (number.isEmpty()) return null;
+        for (int i = 0; i < number.length(); i++) {
+            if (!Character.isDigit(number.charAt(i))) return null;
+        }
+
+        String original = stem.substring(0, open) + ext;
+        return original.isBlank() ? null : original;
+    }
 }
