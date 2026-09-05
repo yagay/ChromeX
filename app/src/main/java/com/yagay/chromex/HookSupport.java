@@ -30,7 +30,7 @@ final class HookSupport {
             Method method = Reflect.exact(type, methodName, params);
             install(method, id, interceptor);
         } catch (Throwable t) {
-            Diagnostics.hookFailed(prefs, id, className + "#" + methodName, t);
+            RuntimeDiagnostics.hookFailed(id, className + "#" + methodName, t);
             error("hook " + className + "#" + methodName, t);
         }
     }
@@ -41,7 +41,7 @@ final class HookSupport {
             Class<?> type = Reflect.cls(loader, className);
             List<Method> methods = Reflect.named(type, methodName);
             if (methods.isEmpty()) {
-                Diagnostics.hookFailed(prefs, idPrefix, className + "#" + methodName,
+                RuntimeDiagnostics.hookFailed(idPrefix, className + "#" + methodName,
                         new NoSuchMethodException("no matching overload"));
                 warn("no method: " + className + "#" + methodName);
                 return;
@@ -51,7 +51,7 @@ final class HookSupport {
                 install(method, idPrefix + ":" + index++, interceptor);
             }
         } catch (Throwable t) {
-            Diagnostics.hookFailed(prefs, idPrefix, className + "#" + methodName, t);
+            RuntimeDiagnostics.hookFailed(idPrefix, className + "#" + methodName, t);
             error("hook all " + className + "#" + methodName, t);
         }
     }
@@ -60,7 +60,7 @@ final class HookSupport {
         try {
             install(method, id, interceptor);
         } catch (Throwable t) {
-            Diagnostics.hookFailed(prefs, id, String.valueOf(method), t);
+            RuntimeDiagnostics.hookFailed(id, String.valueOf(method), t);
             error("hook method " + method, t);
         }
     }
@@ -75,25 +75,25 @@ final class HookSupport {
                 .setId(id)
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
-                    Diagnostics.hit(prefs, id);
+                    RuntimeDiagnostics.hit(id);
                     return interceptor.intercept(chain);
                 });
-        Diagnostics.hookInstalled(prefs, id, method);
+        RuntimeDiagnostics.hookInstalled(id, method);
         info("hooked " + method.getDeclaringClass().getName() + "#" + method.getName());
     }
 
     void info(String message) {
-        Diagnostics.event(prefs, "INFO", message);
+        RuntimeDiagnostics.event("INFO", message);
         module.log(Log.INFO, "ChromeX", message);
     }
 
     void warn(String message) {
-        Diagnostics.event(prefs, "WARN", message);
+        RuntimeDiagnostics.event("WARN", message);
         module.log(Log.WARN, "ChromeX", message);
     }
 
     void error(String message, Throwable t) {
-        Diagnostics.event(prefs, "ERROR", message + " :: "
+        RuntimeDiagnostics.event("ERROR", message + " :: "
                 + (t == null ? "unknown" : t.getClass().getSimpleName() + ": " + t.getMessage()));
         module.log(Log.ERROR, "ChromeX", message, t);
     }
