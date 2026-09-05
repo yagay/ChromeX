@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Shared completion/Toast/APK-installer/banner/translate feature for verified Chromium profiles. */
+/** Shared completion/Toast/APK-installer/banner/translate feature for Chromium profiles. */
 final class ChromiumDownloadCompletionHooks {
     private static final String APK_MIME = "application/vnd.android.package-archive";
     private static final long COMPLETION_SETTLE_MS = 750L;
@@ -103,11 +103,9 @@ final class ChromiumDownloadCompletionHooks {
 
     private DownloadArtifact artifact(Object info) {
         if (info == null) return null;
-        String mime = stringAccessor(info, "getMimeType", "c");
-        String path = stringAccessor(info, "getFilePath", profile.is152()
-                ? Chrome152.DOWNLOAD_INFO_PATH : "e");
-        String name = stringAccessor(info, "getFileName", profile.is152()
-                ? Chrome152.DOWNLOAD_INFO_NAME : "g");
+        String mime = stringAccessor(info, "getMimeType", mimeFallbackField());
+        String path = stringAccessor(info, "getFilePath", pathFallbackField());
+        String name = stringAccessor(info, "getFileName", nameFallbackField());
         String logical = DownloadNormalizationRegistry.logicalPath(path);
         if (logical != null) {
             path = logical;
@@ -115,6 +113,22 @@ final class ChromiumDownloadCompletionHooks {
         }
         if ((path == null || path.isBlank()) && (name == null || name.isBlank())) return null;
         return new DownloadArtifact(path, name, mime);
+    }
+
+    private String mimeFallbackField() {
+        return profile.isVerifiedExact() ? "c" : null;
+    }
+
+    private String pathFallbackField() {
+        if (profile.is152()) return Chrome152.DOWNLOAD_INFO_PATH;
+        if (profile.is145()) return "e";
+        return null;
+    }
+
+    private String nameFallbackField() {
+        if (profile.is152()) return Chrome152.DOWNLOAD_INFO_NAME;
+        if (profile.is145()) return "g";
+        return null;
     }
 
     private void installOpenDownload() {
