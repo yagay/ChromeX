@@ -6,12 +6,8 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -43,7 +39,6 @@ final class Chrome152Corrections {
     void install() {
         installNewTabCorrection();
         installColdStartCorrection();
-        installOpenDialogCorrection();
     }
 
     private void installNewTabCorrection() {
@@ -56,8 +51,7 @@ final class Chrome152Corrections {
                     return chain.proceed();
                 });
 
-        // Also cover stable model-side programmatic creation, including the verified profile's own
-        // cold-start fallback when it attempts to open an NTP GURL.
+        // Cover model-side programmatic creation as a second independent path.
         hooks.all(loader, Chrome145.TAB_MODEL, "openTabProgrammatically",
                 "chromex152:correction:newtab-model", chain -> {
                     if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
@@ -227,7 +221,7 @@ final class Chrome152Corrections {
             Object value = Reflect.get(gurl, "a");
             if (value instanceof String) return (String) value;
         } catch (Throwable ignored) {}
-        for (String method : new String[]{"getSpec", "j"}) {
+        for (String method : new String[]{"getSpec", "j", "n"}) {
             try {
                 Object value = Reflect.call(gurl, method);
                 if (value instanceof String) return (String) value;
@@ -239,62 +233,5 @@ final class Chrome152Corrections {
     private static boolean isNtp(String value) {
         return value != null && (value.startsWith("chrome-native://newtab")
                 || value.startsWith("chrome://newtab"));
-    }
-
-    private void installOpenDialogCorrection() {
-        // Verified DEX signature: J.N.VJOZ(int, long, String, boolean), selector 9 + true.
-        hooks.all(loader,
-                "org.chromium.chrome.browser.download.OpenDownloadDialogBridge",
-                "showDialog", "chromex152:correction:open-dialog", chain -> {
-                    if (!Config.get(prefs, Config.BYPASS_OPEN)) return chain.proceed();
-                    String path = lastString(chain.getArgs().toArray());
-                    if (path == null) return chain.proceed();
-                    try {
-                        long ptr = nativePtr(chain.getThisObject());
-                        if (ptr == 0L) return chain.proceed();
-                        Class<?> nativeClass = Reflect.cls(loader, Chrome145.NATIVE);
-                        Method callback = Reflect.exact(nativeClass, "VJOZ",
-                                int.class, long.class, String.class, boolean.class);
-                        callback.invoke(null, Chrome152.OPEN_ACCEPT, ptr, path, true);
-                        hooks.info("Chrome 152 open-file confirmation accepted via corrected signature");
-                        return null;
-                    } catch (Throwable t) {
-                        hooks.error("Chrome 152 corrected open-file callback", t);
-                        return chain.proceed();
-                    }
-                });
-    }
-
-    private long nativePtr(Object bridge) {
-        if (bridge == null) return 0L;
-        try {
-            long value = Reflect.getLong(bridge, "a");
-            if (value != 0L) return value;
-        } catch (Throwable ignored) {}
-
-        Field found = null;
-        Class<?> type = bridge.getClass();
-        while (type != null && type != Object.class) {
-            for (Field field : type.getDeclaredFields()) {
-                if (Modifier.isStatic(field.getModifiers()) || field.getType() != long.class) continue;
-                if (found != null) return 0L;
-                field.setAccessible(true);
-                found = field;
-            }
-            type = type.getSuperclass();
-        }
-        if (found == null) return 0L;
-        try {
-            return found.getLong(bridge);
-        } catch (Throwable ignored) {
-            return 0L;
-        }
-    }
-
-    private static String lastString(Object[] args) {
-        for (int i = args.length - 1; i >= 0; i--) {
-            if (args[i] instanceof String) return (String) args[i];
-        }
-        return null;
     }
 }
