@@ -33,20 +33,31 @@ The canonical modern Chromium path is:
 
 ### Same-name overwrite
 
-`NativeFirstSameNameOverwriteHooks` treats Chromium's own download record as the source of truth.
+`NativeFirstSameNameOverwriteHooks` is a three-tier engine. The preferred solution prevents Chromium from creating a uniquified filename at all.
 
-Preferred path:
+#### Tier 1: reservation-source conflict policy
 
-1. Capture the duplicate-download target.
-2. Capture the DownloadItem/OfflineItem ContentId.
-3. Temporarily move the previous original file aside.
-4. Call `OfflineContentAggregatorBridge` RenameItem with the original filename.
-5. Let Chromium update its real DownloadItem, OfflineItem and observers.
-6. Verify the target, remove the backup, update the normalization registry and media index.
+Android Chromium confirms a duplicate and then asks `DownloadPathReservationTracker` for the requested path with the `UNIQUIFY` policy. `DownloadConflictPolicyBinding` virtualizes an overwrite policy without patching native code:
 
-If source rename cannot be resolved or fails, ChromeX rolls back safely and uses the transactional same-directory filesystem fallback.
+1. Capture the duplicate target while the original file still exists.
+2. Snapshot the directory and atomically move the old original to a hidden same-directory transaction backup.
+3. Confirm the duplicate through Chromium's normal callback.
+4. Chromium runs its own `GetReservedPath(... UNIQUIFY ...)`; because the original path is now free, it can reserve the original filename instead of `name (1).ext`.
+5. On successful completion, keep the Chromium-created original-name file and delete the old backup.
+6. On confirmation failure, unresolved completion or timeout, restore the old file when the target is still free.
+7. On browser-process restart, recover stale transaction backups before starting another overwrite.
+
+This tier depends on semantic duplicate/completion/DownloadInfo capabilities rather than a browser package or Chromium version. The capability report exposes it as `DOWNLOAD_CONFLICT_POLICY`.
+
+#### Tier 2: Chromium source-of-truth rename
+
+If a backend/fork still creates a numbered file, ChromeX captures the DownloadItem/OfflineItem ContentId and calls `OfflineContentAggregatorBridge` RenameItem with the original filename. Chromium then updates its real DownloadItem, OfflineItem and observers.
 
 Generated semantic JNI is preferred. Stock Chromium builds that compress JNI into `J.N` are resolved from the caller's DEX; `DexNativeSelectorResolver` reads the selector constant from that build instead of hard-coding it.
+
+#### Tier 3: filesystem compatibility fallback
+
+If neither reservation-source preservation nor Chromium source rename succeeds, ChromeX uses a narrow transactional same-directory filesystem replacement, then reconciles DownloadInfo/history/media metadata. Browsers that expose the legacy `DownloadManagerService#getAllDownloads` capability receive a backend refresh; browsers without that method are left untouched.
 
 ## Homepage and new tabs
 
@@ -69,11 +80,15 @@ When a new Chromium-family browser is added:
 Important runtime logs include:
 
 - `Chromium capabilities resolved`
+- `three-tier same-name overwrite installed`
+- `same-name overwrite reservation armed`
+- `same-name overwrite preserved original at reservation source`
 - `offline rename binding installed`
 - `offline rename structural JNI resolved`
 - `offline source rename requested`
 - `same-name overwrite source normalized`
 - `same-name overwrite fallback normalized`
+- `download backend refresh requested after normalization`
 - `tab creator capability bound`
 - `universal cold start settled`
 
