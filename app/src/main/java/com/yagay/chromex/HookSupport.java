@@ -71,12 +71,17 @@ final class HookSupport {
                     + method.getDeclaringClass().getName() + "#" + method.getName());
             return;
         }
+        boolean voidReturn = method.getReturnType() == void.class;
         module.hook(method)
                 .setId(id)
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(chain -> {
                     RuntimeDiagnostics.hit(id);
-                    return interceptor.intercept(chain);
+                    Object value = interceptor.intercept(chain);
+                    // A void Java method cannot legally expose a replacement object. Normalize the
+                    // contract centrally so source-level hooks can delegate to a value-returning
+                    // Chromium helper without leaking that helper's result to libxposed.
+                    return voidReturn ? null : value;
                 });
         RuntimeDiagnostics.hookInstalled(id, method);
         info("hooked " + method.getDeclaringClass().getName() + "#" + method.getName());
