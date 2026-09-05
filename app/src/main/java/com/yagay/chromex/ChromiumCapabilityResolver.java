@@ -4,11 +4,10 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.List;
 
-/** Resolves semantic Chromium capabilities without relying on the browser package name. */
+/** Resolves semantic Chromium capabilities without relying on package names or R8 symbols. */
 final class ChromiumCapabilityResolver {
     private static final String COMMAND_LINE = "org.chromium.base.CommandLine";
     private static final String PREF_SERVICE = "org.chromium.components.prefs.PrefService";
-    private static final String DOWNLOAD_ITEM = "org.chromium.chrome.browser.download.DownloadItem";
     private static final String DUPLICATE_BRIDGE =
             "org.chromium.chrome.browser.download.DuplicateDownloadDialogBridge";
     private static final String DOWNLOAD_DIALOG =
@@ -46,7 +45,8 @@ final class ChromiumCapabilityResolver {
             out.available(BrowserCapabilities.Key.TABBED_ACTIVITY,
                     sourceForStable(), confidenceForStable(), Chrome145.ACTIVITY);
         } else {
-            out.unavailable(BrowserCapabilities.Key.TABBED_ACTIVITY, "stable activity absent");
+            out.unavailable(BrowserCapabilities.Key.TABBED_ACTIVITY,
+                    "stable activity absent; non-tab features may still work");
         }
 
         boolean gurl = hasClass(Chrome145.GURL);
@@ -67,7 +67,7 @@ final class ChromiumCapabilityResolver {
             out.available(BrowserCapabilities.Key.CORE_RUNTIME,
                     activity ? sourceForStable() : BrowserCapabilities.Source.STRUCTURAL,
                     activity ? confidenceForStable() : 80,
-                    "chromium-anchor-score=" + score);
+                    "chromium-anchor-score=" + score + " codePaths=" + runtime.dexPaths().size());
         } else {
             out.unavailable(BrowserCapabilities.Key.CORE_RUNTIME,
                     "chromium-anchor-score=" + score);
@@ -89,14 +89,21 @@ final class ChromiumCapabilityResolver {
 
         if (hasClass(Chrome145.CHROME_TAB_CREATOR)) {
             out.available(BrowserCapabilities.Key.TAB_CREATOR,
-                    sourceForStable(), confidenceForStable(), "ChromeTabCreator");
-        } else if (hasClass(Chrome145.LOAD_URL_PARAMS)
-                && hasClass("org.chromium.chrome.browser.tab.Tab") && tabModel) {
-            out.available(BrowserCapabilities.Key.TAB_CREATOR,
-                    BrowserCapabilities.Source.LIVE_RUNTIME, 72,
-                    "resolve LoadUrlParams -> Tab creator from live graph");
+                    sourceForStable(), confidenceForStable(), "ChromeTabCreator stable class");
         } else {
-            out.unavailable(BrowserCapabilities.Key.TAB_CREATOR, "creator anchors absent");
+            Method creator = AdaptiveDexResolver.resolveTabCreator(runtime, hooks);
+            if (creator != null) {
+                out.available(BrowserCapabilities.Key.TAB_CREATOR,
+                        BrowserCapabilities.Source.SEMANTIC_DEX, 95,
+                        creator.getDeclaringClass().getName() + '#' + creator.getName());
+            } else if (hasClass(ChromiumSemanticAnchors.LOAD_URL_PARAMS)
+                    && hasClass(ChromiumSemanticAnchors.TAB) && tabModel) {
+                out.available(BrowserCapabilities.Key.TAB_CREATOR,
+                        BrowserCapabilities.Source.LIVE_RUNTIME, 72,
+                        "resolve LoadUrlParams -> Tab creator from live graph");
+            } else {
+                out.unavailable(BrowserCapabilities.Key.TAB_CREATOR, "creator anchors absent");
+            }
         }
 
         if (profile.isVerifiedExact() && (hasClass(Chrome145.HOMEPAGE_MANAGER)
@@ -134,8 +141,8 @@ final class ChromiumCapabilityResolver {
         boolean info = hasClass(Chrome145.DOWNLOAD_INFO);
         if (info) {
             out.available(BrowserCapabilities.Key.DOWNLOAD_INFO,
-                    BrowserCapabilities.Source.STRUCTURAL, profile.isVerifiedExact() ? 100 : 92,
-                    "stable type + semantic value accessor");
+                    BrowserCapabilities.Source.STRUCTURAL, profile.isVerifiedExact() ? 100 : 94,
+                    "stable DownloadInfo type + value-shape accessor");
         } else {
             out.unavailable(BrowserCapabilities.Key.DOWNLOAD_INFO, "DownloadInfo absent");
         }
@@ -144,7 +151,7 @@ final class ChromiumCapabilityResolver {
                 Chrome145.DOWNLOAD_CONTROLLER, Chrome145.DOWNLOAD_MANAGER_SERVICE);
         if (completion != null && info) {
             out.available(BrowserCapabilities.Key.DOWNLOAD_COMPLETION,
-                    sourceForStable(), confidenceForStable(), completion + "#onDownloadCompleted");
+                    sourceForStable(), confidenceForStable(), completion + "#onDownloadCompleted(*)");
         } else {
             out.unavailable(BrowserCapabilities.Key.DOWNLOAD_COMPLETION,
                     "onDownloadCompleted unresolved");
@@ -166,23 +173,34 @@ final class ChromiumCapabilityResolver {
                     sourceForStable(), confidenceForStable(), "DownloadManagerService callbacks");
         } else {
             out.unavailable(BrowserCapabilities.Key.DOWNLOAD_HISTORY,
-                    "standard history callbacks absent; vendor model possible");
+                    "standard history callbacks absent; vendor/new backend possible");
         }
 
-        if (hasMethod(DOWNLOAD_ITEM, "createOfflineItem")) {
+        Method offline = findOfflineMaterializer();
+        if (offline != null) {
             out.available(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI,
-                    sourceForStable(), confidenceForStable(), "DownloadItem#createOfflineItem");
+                    "createOfflineItem".equals(offline.getName()) ? sourceForStable()
+                            : BrowserCapabilities.Source.STRUCTURAL,
+                    "createOfflineItem".equals(offline.getName()) ? confidenceForStable() : 92,
+                    offline.getDeclaringClass().getName() + '#' + offline.getName()
+                            + "(DownloadItem)->OfflineItem");
         } else {
             out.unavailable(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI,
-                    "standard OfflineItem materializer absent");
+                    "OfflineItem materializer unresolved");
         }
 
         if (hasMethod(Chrome145.DOWNLOAD_MANAGER_SERVICE, "renameDownload")) {
             out.available(BrowserCapabilities.Key.DOWNLOAD_RENAME,
-                    sourceForStable(), confidenceForStable(), "DownloadManagerService#renameDownload");
+                    sourceForStable(), confidenceForStable(),
+                    "legacy DownloadManagerService#renameDownload record backend");
+        } else if (hasMethod(ChromiumSemanticAnchors.DOWNLOAD_COLLECTION_BRIDGE,
+                "renameDownloadUri")) {
+            out.available(BrowserCapabilities.Key.DOWNLOAD_RENAME,
+                    BrowserCapabilities.Source.STABLE_API, 72,
+                    "modern DownloadCollectionBridge#renameDownloadUri MediaStore backend");
         } else {
             out.unavailable(BrowserCapabilities.Key.DOWNLOAD_RENAME,
-                    "legacy rename API absent; native/backend binding required");
+                    "rename backend unresolved; transactional file fallback only");
         }
 
         if (hasMethod(Chrome145.DOWNLOAD_UTILS, "openDownload")) {
@@ -207,6 +225,25 @@ final class ChromiumCapabilityResolver {
                     sourceForStable(), confidenceForStable(), Chrome145.TRANSLATE_MESSAGE);
         } else {
             out.unavailable(BrowserCapabilities.Key.TRANSLATE_MESSAGE, "TranslateMessage absent");
+        }
+    }
+
+    private Method findOfflineMaterializer() {
+        try {
+            Class<?> item = Reflect.cls(loader, ChromiumSemanticAnchors.DOWNLOAD_ITEM);
+            Class<?> offline = Reflect.cls(loader, ChromiumSemanticAnchors.OFFLINE_ITEM);
+            Method found = null;
+            for (Method method : item.getDeclaredMethods()) {
+                if (!Modifier.isStatic(method.getModifiers()) || method.getReturnType() != offline) continue;
+                Class<?>[] p = method.getParameterTypes();
+                if (p.length != 1 || p[0] != item) continue;
+                if (found != null) return null;
+                try { method.setAccessible(true); } catch (Throwable ignored) {}
+                found = method;
+            }
+            return found;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
