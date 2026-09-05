@@ -44,35 +44,27 @@ public final class ModuleMain extends XposedModule {
 
     private void installForRuntime(ChromeRuntime runtime) {
         RuntimeDiagnostics.flushPendingIfPossible();
-        ChromiumProfile profile = ChromiumProfile.detect(runtime);
+        ChromiumProfile profile = ChromiumProfile.resolve(runtime);
+        if (profile == null) return;
+
+        hooks.info("Chromium capability profile selected: " + profile.label()
+                + " version=" + runtime.versionName);
 
         installFeature("same-name download overwrite", () ->
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install());
         installFeature("download history rewrite", () ->
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install());
-
-        if (profile != null) {
-            hooks.info("verified Chromium profile selected: " + profile.label()
-                    + " " + runtime.versionName);
-            installFeature("Chromium tabs/homepage", () ->
-                    new ChromiumTabsHooks(profile, runtime.classLoader, hooks, prefs).install());
-            installFeature("Chromium downloads", () ->
-                    new ChromiumDownloadHooks(profile, runtime, hooks, prefs).install());
-            hooks.info("shared Chromium feature profile active: " + profile.family);
-        } else {
-            hooks.info("no verified exact profile; enabling structural capability fallbacks");
-            installFeature("adaptive Chromium hooks", () ->
-                    new AdaptiveChromeHooks(this, hooks, prefs, runtime).install());
-            installFeature("adaptive Chromium download dialogs", () ->
-                    new AdaptiveDownloadDialogs(runtime, hooks, prefs).install());
-        }
+        installFeature("Chromium tabs/homepage", () ->
+                new ChromiumTabsHooks(profile, runtime, hooks, prefs).install());
+        installFeature("Chromium downloads", () ->
+                new ChromiumDownloadHooks(profile, runtime, hooks, prefs).install());
 
         try {
             Diagnostics.scheduleScan(prefs, runtime.classLoader);
         } catch (Throwable t) {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
-        hooks.info("ChromeX feature hooks installed after Chromium split ready");
+        hooks.info("shared Chromium feature layers installed: " + profile.family);
     }
 
     private void installFeature(String name, Runnable installer) {
