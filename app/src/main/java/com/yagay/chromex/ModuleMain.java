@@ -46,7 +46,6 @@ public final class ModuleMain extends XposedModule {
         RuntimeDiagnostics.flushPendingIfPossible();
         ChromiumProfile profile = ChromiumProfile.detect(runtime);
 
-        // Stable download services are independent of the exact Chromium profile.
         installFeature("same-name download overwrite", () ->
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install());
         installFeature("download history rewrite", () ->
@@ -58,7 +57,7 @@ public final class ModuleMain extends XposedModule {
             installFeature("Chromium tabs/homepage", () ->
                     new ChromiumTabsHooks(profile, runtime.classLoader, hooks, prefs).install());
             installFeature("Chromium downloads", () ->
-                    new ChromiumDownloadHooks(profile, runtime, this, hooks, prefs).install());
+                    new ChromiumDownloadHooks(profile, runtime, hooks, prefs).install());
             hooks.info("shared Chromium feature profile active: " + profile.family);
         } else {
             hooks.info("no verified exact profile; enabling structural capability fallbacks");
