@@ -33,8 +33,10 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
     public void onCreate() {
         super.onCreate();
         try {
-            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.URI,
-                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            int write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+            int readWrite = Intent.FLAG_GRANT_READ_URI_PERMISSION | write;
+            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.URI, write);
+            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.CACHE_URI, readWrite);
         } catch (Throwable ignored) {}
         XposedServiceHelper.registerListener(this);
     }
