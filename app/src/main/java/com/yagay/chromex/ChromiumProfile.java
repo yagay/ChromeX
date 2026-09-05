@@ -1,15 +1,16 @@
 package com.yagay.chromex;
 
 /**
- * Small compatibility descriptor for verified Chromium builds.
+ * Small compatibility descriptor for Chromium feature code.
  *
- * <p>Feature implementations are shared. A profile only tells them which exact symbol family is
- * available when stable Chromium APIs are insufficient.</p>
+ * <p>Verified builds expose exact fallback symbols. Unknown Chromium builds use the ADAPTIVE
+ * family, which is restricted to stable APIs, structural reflection and DexKit-resolved symbols.</p>
  */
 final class ChromiumProfile {
     enum Family {
         CHROME_145,
-        CHROME_152
+        CHROME_152,
+        ADAPTIVE
     }
 
     static final String VERIFIED_CHROME145 = "145.0.7632.218";
@@ -29,7 +30,7 @@ final class ChromiumProfile {
         this.maxRounds = maxRounds;
     }
 
-    static ChromiumProfile detect(ChromeRuntime runtime) {
+    static ChromiumProfile resolve(ChromeRuntime runtime) {
         if (runtime == null) return null;
         if (Chrome152.matches(runtime)) {
             return new ChromiumProfile(Family.CHROME_152, runtime.versionName,
@@ -39,7 +40,8 @@ final class ChromiumProfile {
             return new ChromiumProfile(Family.CHROME_145, runtime.versionName,
                     500L, 600L, 6);
         }
-        return null;
+        return new ChromiumProfile(Family.ADAPTIVE, runtime.versionName,
+                700L, 800L, 5);
     }
 
     boolean is145() {
@@ -50,7 +52,17 @@ final class ChromiumProfile {
         return family == Family.CHROME_152;
     }
 
+    boolean isAdaptive() {
+        return family == Family.ADAPTIVE;
+    }
+
+    boolean isVerifiedExact() {
+        return !isAdaptive();
+    }
+
     String label() {
-        return family == Family.CHROME_152 ? "Chrome 152" : "Chrome 145";
+        if (is152()) return "Chrome 152";
+        if (is145()) return "Chrome 145";
+        return "Adaptive Chromium";
     }
 }
