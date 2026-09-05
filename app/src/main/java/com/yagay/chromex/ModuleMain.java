@@ -72,6 +72,7 @@ public final class ModuleMain extends XposedModule {
         installFeature("download history rewrite", () -> {
             if (profile.isAdaptive()) {
                 new AdaptiveDownloadHistoryCompat(runtime, hooks, prefs).install();
+                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
             } else {
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install();
             }
