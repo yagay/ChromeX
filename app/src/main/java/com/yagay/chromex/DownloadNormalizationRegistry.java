@@ -1,15 +1,17 @@
 package com.yagay.chromex;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Process-local source of truth for files normalized after Chromium uniquifies a conflict.
  *
- * <p>Mappings are intentionally short lived. They are only used to make Chrome's Java history/UI
- * consume the exact filesystem result produced by SameNameOverwriteHooks, instead of guessing from
- * file existence or filename patterns.</p>
+ * <p>Mappings are intentionally short lived. Feature bindings may independently subscribe to a
+ * normalization event (for example Java history reconciliation and a legacy download-backend
+ * refresh) without replacing one another.</p>
  */
 final class DownloadNormalizationRegistry {
     interface Listener {
@@ -20,13 +22,21 @@ final class DownloadNormalizationRegistry {
     private static final int MAX = 128;
     private static final Object LOCK = new Object();
     private static final LinkedHashMap<String, Entry> ENTRIES = new LinkedHashMap<>();
-    private static Listener listener;
+    private static final ArrayList<Listener> LISTENERS = new ArrayList<>();
 
     private DownloadNormalizationRegistry() {}
 
+    /**
+     * Historical API name kept for source compatibility. Listeners are additive so independent
+     * capability bindings cannot silently disable each other.
+     */
     static void setListener(Listener value) {
+        if (value == null) return;
         synchronized (LOCK) {
-            listener = value;
+            for (Listener existing : LISTENERS) {
+                if (existing == value) return;
+            }
+            LISTENERS.add(value);
             pruneLocked(System.currentTimeMillis());
         }
     }
@@ -36,7 +46,7 @@ final class DownloadNormalizationRegistry {
         String newPath = canonical(newFile);
         if (oldPath == null || newPath == null || oldPath.equals(newPath)) return;
 
-        Listener notify;
+        List<Listener> notify;
         synchronized (LOCK) {
             long now = System.currentTimeMillis();
             pruneLocked(now);
@@ -45,10 +55,10 @@ final class DownloadNormalizationRegistry {
                 String first = ENTRIES.keySet().iterator().next();
                 ENTRIES.remove(first);
             }
-            notify = listener;
+            notify = new ArrayList<>(LISTENERS);
         }
-        if (notify != null) {
-            try { notify.onNormalized(oldPath, newPath); } catch (Throwable ignored) {}
+        for (Listener listener : notify) {
+            try { listener.onNormalized(oldPath, newPath); } catch (Throwable ignored) {}
         }
     }
 
