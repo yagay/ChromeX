@@ -84,10 +84,37 @@ final class BrowserCapabilities {
         }
 
         BrowserCapabilities build() {
+            deriveConflictPolicy();
             for (Key key : Key.values()) {
                 values.putIfAbsent(key, new Entry(key, false, Source.UNAVAILABLE, 0, "not resolved"));
             }
             return new BrowserCapabilities(values);
+        }
+
+        /**
+         * Duplicate bridge + completion + DownloadInfo are enough to virtualize Chromium's path
+         * reservation policy by temporarily vacating the old target before confirmation.
+         */
+        private void deriveConflictPolicy() {
+            if (values.containsKey(Key.DOWNLOAD_CONFLICT_POLICY)) return;
+            Entry duplicate = values.get(Key.DOWNLOAD_DUPLICATE_CONFLICT);
+            Entry completion = values.get(Key.DOWNLOAD_COMPLETION);
+            Entry info = values.get(Key.DOWNLOAD_INFO);
+            if (available(duplicate) && available(completion) && available(info)) {
+                int confidence = Math.min(90,
+                        Math.min(duplicate.confidence, Math.min(completion.confidence, info.confidence)));
+                values.put(Key.DOWNLOAD_CONFLICT_POLICY,
+                        new Entry(Key.DOWNLOAD_CONFLICT_POLICY, true, Source.STRUCTURAL, confidence,
+                                "duplicate confirmation + original-path reservation virtualization"));
+            } else {
+                values.put(Key.DOWNLOAD_CONFLICT_POLICY,
+                        new Entry(Key.DOWNLOAD_CONFLICT_POLICY, false, Source.UNAVAILABLE, 0,
+                                "duplicate/completion/DownloadInfo anchors incomplete"));
+            }
+        }
+
+        private static boolean available(Entry entry) {
+            return entry != null && entry.available;
         }
     }
 
