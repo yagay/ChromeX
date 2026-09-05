@@ -11,6 +11,7 @@ import android.os.Looper;
 import android.provider.MediaStore;
 import android.widget.Toast;
 
+import java.io.File;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Locale;
@@ -21,10 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Version-independent completion support. Stable DownloadController callbacks are preferred;
- * MediaStore is retained as a fallback for builds/paths where those callbacks cannot be resolved.
- */
+/** Version-independent completion support with one primary event source and one fallback. */
 final class AdaptiveDownloadObserver {
     private static final String APK_MIME = "application/vnd.android.package-archive";
     private static final long BANNER_WINDOW_MS = 4000L;
@@ -40,7 +38,7 @@ final class AdaptiveDownloadObserver {
         return t;
     });
     private final Map<String, Long> seen = new ConcurrentHashMap<>();
-    private final AtomicLong suppressBannerUntil = new AtomicLong(0L);
+    private final AtomicLong suppressBannerUntil = new AtomicLong();
     private final AtomicInteger suppressBudget = new AtomicInteger();
     private final long startedAtSeconds = System.currentTimeMillis() / 1000L;
 
@@ -52,28 +50,30 @@ final class AdaptiveDownloadObserver {
 
     void install() {
         installBannerSuppression();
-        installStableCompletionHook();
-        installMediaStoreFallback();
+        boolean stable = installStableCompletionHook();
+        if (!stable) installMediaStoreFallback();
     }
 
-    private void installStableCompletionHook() {
+    private boolean installStableCompletionHook() {
         try {
             Reflect.cls(runtime.classLoader, Chrome145.DOWNLOAD_CONTROLLER);
+            Reflect.cls(runtime.classLoader, Chrome145.DOWNLOAD_INFO);
             hooks.all(runtime.classLoader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
                     "chromex:adaptive:download-completed", chain -> {
                         Object info = findDownloadInfo(chain.getArgs().toArray());
                         if (info != null) {
-                            String mime = stringAccessor(info, "getMimeType");
-                            String path = stringAccessor(info, "getFilePath");
-                            String name = stringAccessor(info, "getFileName");
-                            onCompleted(path, null, name, mime, "DownloadController");
+                            onCompleted(stringAccessor(info, "getFilePath"), null,
+                                    stringAccessor(info, "getFileName"),
+                                    stringAccessor(info, "getMimeType"), "DownloadController");
                         }
                         return chain.proceed();
                     });
-            hooks.info("adaptive DownloadController completion hook installed");
+            hooks.info("adaptive DownloadController completion hook installed; MediaStore fallback disabled");
+            return true;
         } catch (Throwable t) {
             hooks.warn("adaptive DownloadController completion unavailable: "
                     + t.getClass().getSimpleName());
+            return false;
         }
     }
 
@@ -82,8 +82,7 @@ final class AdaptiveDownloadObserver {
             ContentResolver resolver = runtime.application.getContentResolver();
             resolver.registerContentObserver(MediaStore.Downloads.EXTERNAL_CONTENT_URI, true,
                     new ContentObserver(main) {
-                        @Override
-                        public void onChange(boolean selfChange, Uri uri) {
+                        @Override public void onChange(boolean selfChange, Uri uri) {
                             worker.execute(() -> inspect(uri));
                         }
                     });
@@ -104,7 +103,7 @@ final class AdaptiveDownloadObserver {
                 if (Modifier.isStatic(method.getModifiers())) continue;
                 Class<?>[] p = method.getParameterTypes();
                 if (p.length == 0 || p[0] != offlineItem) continue;
-                method.setAccessible(true);
+                try { method.setAccessible(true); } catch (Throwable ignored) {}
                 String id = "chromex:adaptive:download-banner:" + method.getName() + ":" + installed;
                 hooks.method(method, id, chain -> {
                     if (suppressBannerUntil.get() >= System.currentTimeMillis()
@@ -167,6 +166,11 @@ final class AdaptiveDownloadObserver {
     }
 
     private void onCompleted(String path, Uri knownUri, String name, String mime, String source) {
+        String logicalPath = DownloadNormalizationRegistry.logicalPath(path);
+        if (logicalPath != null) {
+            path = logicalPath;
+            name = new File(logicalPath).getName();
+        }
         String key = name == null || name.isBlank()
                 ? (path == null ? String.valueOf(knownUri) : path) : name;
         if (!markSeen(key)) return;
@@ -221,12 +225,9 @@ final class AdaptiveDownloadObserver {
 
     private void showToast(String name) {
         main.post(() -> {
-            try {
-                Toast.makeText(runtime.application, "下载完成: " + name,
-                        Toast.LENGTH_SHORT).show();
-            } catch (Throwable t) {
-                hooks.warn("adaptive download Toast failed: " + t.getClass().getSimpleName());
-            }
+            try { Toast.makeText(runtime.application, "下载完成: " + name, Toast.LENGTH_SHORT).show(); }
+            catch (Throwable t) { hooks.warn("adaptive download Toast failed: "
+                    + t.getClass().getSimpleName()); }
         });
     }
 
