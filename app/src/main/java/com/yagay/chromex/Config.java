@@ -21,6 +21,7 @@ public final class Config {
     public static final String BYPASS_INSECURE = "bypass_insecure";
     public static final String BYPASS_DUPLICATE = "bypass_duplicate";
     public static final String OVERWRITE_DUPLICATE = "overwrite_duplicate";
+    public static final String OVERWRITE_CONFIRM_DUPLICATE = "overwrite_confirm_duplicate";
     public static final String BYPASS_POLICY = "bypass_policy";
     public static final String BYPASS_LOCATION = "bypass_location";
     public static final String BYPASS_OPEN = "bypass_open";
@@ -97,6 +98,12 @@ public final class Config {
                     && prefs.getBoolean(OVERWRITE_DUPLICATE, defaultValue(OVERWRITE_DUPLICATE))) {
                 return false;
             }
+            // When the user asks to keep Chromium's duplicate confirmation, the confirmation
+            // policy temporarily suppresses only the auto-confirm overwrite interceptor on the
+            // current callback thread. Completion/history normalization remains enabled.
+            if (OVERWRITE_DUPLICATE.equals(key) && OverwriteConfirmationPolicy.isSuppressed()) {
+                return false;
+            }
             return prefs.getBoolean(key, defaultValue(key));
         } catch (Throwable ignored) {
             return defaultValue(key);
@@ -152,7 +159,8 @@ public final class Config {
                 || isAutoOpenKey(key)
                 || DIAGNOSTIC_MODE.equals(key)
                 || ALL_DOWNLOAD_TOAST.equals(key)
-                || OVERWRITE_DUPLICATE.equals(key)) {
+                || OVERWRITE_DUPLICATE.equals(key)
+                || OVERWRITE_CONFIRM_DUPLICATE.equals(key)) {
             return false;
         }
         return true;
