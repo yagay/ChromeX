@@ -1,9 +1,10 @@
 package com.yagay.chromex;
 
-import android.content.Context;
 import android.content.SharedPreferences;
 import android.media.MediaScannerConnection;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.io.File;
 import java.lang.reflect.Field;
@@ -14,20 +15,25 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
-/** Transactional same-name overwrite with conservative matching. */
+/** Transactional same-name overwrite with post-completion file discovery. */
 final class SameNameOverwriteHooks {
     private static final String DUPLICATE_BRIDGE =
             "org.chromium.chrome.browser.download.DuplicateDownloadDialogBridge";
     private static final long PENDING_TTL_MS = 2L * 60L * 60L * 1000L;
     private static final int MAX_PENDING = 64;
+    private static final int MAX_RESOLVE_RETRIES = 20;
+    private static final long RESOLVE_RETRY_MS = 250L;
     private static final Object LOCK = new Object();
     private static final List<PendingTarget> PENDING = new ArrayList<>();
 
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
+    private final Handler main = new Handler(Looper.getMainLooper());
 
     SameNameOverwriteHooks(ChromeRuntime runtime, HookSupport hooks, SharedPreferences prefs) {
         this.runtime = runtime;
@@ -64,7 +70,7 @@ final class SameNameOverwriteHooks {
                         hooks.warn("same-name overwrite: callback unresolved; keeping Chrome dialog");
                         return chain.proceed();
                     }
-                    hooks.info("same-name overwrite armed: " + desired.getName()
+                    hooks.info("same-name overwrite armed: " + desired.getAbsolutePath()
                             + " callback=" + callbackId);
                     return null;
                 });
@@ -79,15 +85,21 @@ final class SameNameOverwriteHooks {
         }
         hooks.all(runtime.classLoader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
                 "chromex:download:overwrite-completed", chain -> {
-                    if (Config.get(prefs, Config.OVERWRITE_DUPLICATE)) {
+                    Object info = findDownloadInfo(chain.getArgs().toArray());
+
+                    // Important: Chrome's original completion callback is allowed to run first.
+                    // On Chrome 152 the final uniquified file may not exist until this callback has
+                    // finished its own bookkeeping, so resolving before proceed() races the file.
+                    Object result = chain.proceed();
+
+                    if (Config.get(prefs, Config.OVERWRITE_DUPLICATE) && info != null) {
                         try {
-                            Object info = findDownloadInfo(chain.getArgs().toArray());
-                            normalize(info);
+                            normalize(info, 0);
                         } catch (Throwable t) {
                             hooks.error("same-name overwrite completion", t);
                         }
                     }
-                    return chain.proceed();
+                    return result;
                 });
     }
 
@@ -101,7 +113,7 @@ final class SameNameOverwriteHooks {
         return null;
     }
 
-    private void normalize(Object info) {
+    private void normalize(Object info, int attempt) {
         if (info == null || pendingCount() == 0) return;
         String path = stringAccessor(info, "getFilePath",
                 Chrome152.matches(runtime) ? Chrome152.DOWNLOAD_INFO_PATH : null);
@@ -112,35 +124,44 @@ final class SameNameOverwriteHooks {
         File direct = sharedFile(path);
         PendingTarget pending = takeMatching(direct, path, name, alt);
         if (pending == null) {
-            hooks.warn("same-name overwrite completion unmatched: path=" + safeName(path)
-                    + " name=" + safeName(name) + " pending=" + pendingCount());
+            if (attempt == 0) {
+                hooks.warn("same-name overwrite completion unmatched: path=" + safeName(path)
+                        + " name=" + safeName(name) + " pending=" + pendingCount());
+            }
             return;
         }
 
         File desired = pending.desired;
-        File actual = resolveActualFile(desired, direct, path, name, alt);
+        File actual = resolveActualFile(pending, direct, path, name, alt);
         if (actual == null) {
             restorePending(pending);
-            hooks.warn("same-name overwrite actual file unresolved: desired=" + desired.getName());
+            if (attempt < MAX_RESOLVE_RETRIES) {
+                main.postDelayed(() -> normalize(info, attempt + 1), RESOLVE_RETRY_MS);
+            } else {
+                hooks.warn("same-name overwrite actual file unresolved after retries: desired="
+                        + desired.getAbsolutePath() + " reportedPath=" + safeValue(path)
+                        + " reportedName=" + safeValue(name)
+                        + " dirs=" + directorySummary(desired));
+            }
             return;
         }
+
         if (sameFile(actual, desired)) {
             updateDownloadInfo(info, desired);
-            hooks.info("same-name overwrite completed with original name: " + desired.getName());
+            hooks.info("same-name overwrite completed with original name: " + desired.getAbsolutePath());
             return;
         }
-        if (!sameParent(actual, desired)
-                || !DownloadNamePolicy.matchesUniquifiedName(desired.getName(), actual.getName())) {
+        if (!DownloadNamePolicy.matchesUniquifiedName(desired.getName(), actual.getName())) {
             restorePending(pending);
-            hooks.warn("same-name overwrite refused unexpected target: " + actual.getName());
+            hooks.warn("same-name overwrite refused unexpected target: " + actual.getAbsolutePath());
             return;
         }
 
         ReplaceResult result = transactionalReplace(actual, desired);
         if (!result.success) {
             restorePending(pending);
-            hooks.warn("same-name overwrite failed: " + actual.getName() + " -> "
-                    + desired.getName() + " :: " + result.detail);
+            hooks.warn("same-name overwrite failed: " + actual.getAbsolutePath() + " -> "
+                    + desired.getAbsolutePath() + " :: " + result.detail);
             return;
         }
         updateDownloadInfo(info, desired);
@@ -148,31 +169,76 @@ final class SameNameOverwriteHooks {
             MediaScannerConnection.scanFile(runtime.application,
                     new String[]{desired.getAbsolutePath()}, null, null);
         } catch (Throwable ignored) {}
-        hooks.info("same-name overwrite normalized: " + actual.getName()
-                + " -> " + desired.getName() + " via " + result.detail);
+        hooks.info("same-name overwrite normalized: " + actual.getAbsolutePath()
+                + " -> " + desired.getAbsolutePath() + " via " + result.detail
+                + " attempt=" + attempt);
     }
 
-    private File resolveActualFile(File desired, File direct, String... reported) {
+    private File resolveActualFile(PendingTarget pending, File direct, String... reported) {
+        File desired = pending.desired;
         try {
-            if (direct != null && direct.exists() && direct.isFile() && sameParent(direct, desired)) {
-                return direct;
-            }
-            File parent = desired.getParentFile();
-            if (parent == null) return null;
-            File found = null;
+            // Prefer the exact path Chrome reports, but never mistake the unchanged old target for
+            // the newly downloaded file.
+            if (usableCandidate(pending, direct)) return direct.getCanonicalFile();
+
+            List<File> dirs = downloadDirectories(desired);
+
+            // If DownloadInfo exposes only a file name, resolve it in every directory Chrome can
+            // actually use. In particular Chrome 152 may complete into
+            // Android/data/com.android.chrome/files/Download while the duplicate bridge reports a
+            // public Download target (or vice versa).
             for (String value : reported) {
-                String name = DownloadNamePolicy.fileNameOnly(value);
-                if (name == null || !DownloadNamePolicy.matchesUniquifiedName(desired.getName(), name)) {
-                    continue;
+                String reportedName = DownloadNamePolicy.fileNameOnly(value);
+                if (reportedName == null) continue;
+                for (File dir : dirs) {
+                    File candidate = new File(dir, reportedName);
+                    if (usableCandidate(pending, candidate)) return candidate.getCanonicalFile();
                 }
-                File candidate = new File(parent, name).getCanonicalFile();
-                if (!isSharedFile(candidate) || !candidate.exists() || !candidate.isFile()) continue;
-                if (found != null && !sameFile(found, candidate)) return null;
-                found = candidate;
             }
-            return found;
+
+            // Chrome 152 can report the original name even though native download code has already
+            // uniquified the real file to "name (n).ext". Discover the new/changed matching file
+            // by comparing the directory state captured when the duplicate dialog was shown.
+            File best = null;
+            long bestModified = Long.MIN_VALUE;
+            for (File dir : dirs) {
+                File[] files;
+                try { files = dir.listFiles(); } catch (Throwable ignored) { files = null; }
+                if (files == null) continue;
+                for (File candidate : files) {
+                    if (candidate == null || !candidate.isFile()) continue;
+                    if (!DownloadNamePolicy.matchesUniquifiedName(
+                            desired.getName(), candidate.getName())) continue;
+                    if (sameFile(candidate, desired)) continue;
+                    if (!usableCandidate(pending, candidate)) continue;
+                    long modified = candidate.lastModified();
+                    if (best == null || modified > bestModified) {
+                        best = candidate.getCanonicalFile();
+                        bestModified = modified;
+                    }
+                }
+            }
+            return best;
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    private boolean usableCandidate(PendingTarget pending, File candidate) {
+        if (candidate == null) return false;
+        try {
+            candidate = candidate.getCanonicalFile();
+            if (!isSharedFile(candidate) || !candidate.exists() || !candidate.isFile()) return false;
+            String name = candidate.getName();
+            if (!name.equals(pending.desired.getName())
+                    && !DownloadNamePolicy.matchesUniquifiedName(pending.desired.getName(), name)) {
+                return false;
+            }
+            FileStamp before = pending.before.get(candidate.getCanonicalPath());
+            if (before == null) return true;
+            return before.length != candidate.length() || before.modified != candidate.lastModified();
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -182,7 +248,9 @@ final class SameNameOverwriteHooks {
         try {
             actual = actual.getCanonicalFile();
             desired = desired.getCanonicalFile();
-            if (!sameParent(actual, desired)) return ReplaceResult.fail("different directories");
+            if (!isSharedFile(actual) || !isSharedFile(desired)) {
+                return ReplaceResult.fail("path outside shared storage");
+            }
             if (!actual.exists() || !actual.isFile()) return ReplaceResult.fail("replacement missing");
             if (desired.exists() && !desired.isFile()) return ReplaceResult.fail("original is not a file");
 
@@ -221,7 +289,9 @@ final class SameNameOverwriteHooks {
             if (backup != null && backup.exists() && !backup.delete()) {
                 backup.deleteOnExit();
             }
-            return ReplaceResult.ok("transactional filesystem");
+            return ReplaceResult.ok(sameParent(actual, desired)
+                    ? "transactional same-directory move"
+                    : "transactional cross-directory move");
         } catch (Throwable t) {
             if (backedUp && backup != null && backup.exists() && !desired.exists()) {
                 try { move(backup, desired, true); } catch (Throwable ignored) {}
@@ -256,14 +326,65 @@ final class SameNameOverwriteHooks {
     }
 
     private PendingTarget remember(long callbackId, File desired) {
-        PendingTarget pending = new PendingTarget(callbackId, desired, System.currentTimeMillis());
+        long now = System.currentTimeMillis();
+        PendingTarget pending = new PendingTarget(callbackId, desired, now, snapshot(desired));
         synchronized (LOCK) {
-            pruneLocked(pending.time);
+            pruneLocked(now);
             PENDING.removeIf(old -> old.callbackId == callbackId);
             PENDING.add(pending);
             while (PENDING.size() > MAX_PENDING) PENDING.remove(0);
         }
         return pending;
+    }
+
+    private Map<String, FileStamp> snapshot(File desired) {
+        LinkedHashMap<String, FileStamp> result = new LinkedHashMap<>();
+        for (File dir : downloadDirectories(desired)) {
+            File[] files;
+            try { files = dir.listFiles(); } catch (Throwable ignored) { files = null; }
+            if (files == null) continue;
+            for (File file : files) {
+                if (file == null || !file.isFile()) continue;
+                String name = file.getName();
+                if (!name.equals(desired.getName())
+                        && !DownloadNamePolicy.matchesUniquifiedName(desired.getName(), name)) continue;
+                try {
+                    File canonical = file.getCanonicalFile();
+                    result.put(canonical.getPath(), new FileStamp(canonical.length(), canonical.lastModified()));
+                } catch (Throwable ignored) {}
+            }
+        }
+        return result;
+    }
+
+    private List<File> downloadDirectories(File desired) {
+        LinkedHashMap<String, File> unique = new LinkedHashMap<>();
+        addDirectory(unique, desired == null ? null : desired.getParentFile());
+        try { addDirectory(unique, runtime.application.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)); }
+        catch (Throwable ignored) {}
+        try {
+            addDirectory(unique, new File(Environment.getExternalStorageDirectory(),
+                    Environment.DIRECTORY_DOWNLOADS));
+        } catch (Throwable ignored) {}
+        return new ArrayList<>(unique.values());
+    }
+
+    private static void addDirectory(Map<String, File> out, File directory) {
+        if (directory == null) return;
+        try {
+            File canonical = directory.getCanonicalFile();
+            if (!isSharedFile(canonical)) return;
+            out.put(canonical.getPath(), canonical);
+        } catch (Throwable ignored) {}
+    }
+
+    private String directorySummary(File desired) {
+        StringBuilder out = new StringBuilder();
+        for (File dir : downloadDirectories(desired)) {
+            if (out.length() > 0) out.append('|');
+            out.append(dir.getAbsolutePath());
+        }
+        return out.toString();
     }
 
     private void restorePending(PendingTarget pending) {
@@ -292,7 +413,7 @@ final class SameNameOverwriteHooks {
             pruneLocked(System.currentTimeMillis());
             PendingTarget found = null;
             for (PendingTarget pending : PENDING) {
-                boolean matches = actual != null && sameParent(actual, pending.desired)
+                boolean matches = actual != null
                         && DownloadNamePolicy.matchesUniquifiedName(
                         pending.desired.getName(), actual.getName());
                 if (!matches) {
@@ -434,15 +555,31 @@ final class SameNameOverwriteHooks {
         return name == null || name.isBlank() ? "<none>" : name;
     }
 
+    private static String safeValue(String value) {
+        return value == null || value.isBlank() ? "<none>" : value;
+    }
+
     private static final class PendingTarget {
         final long callbackId;
         final File desired;
         final long time;
+        final Map<String, FileStamp> before;
 
-        PendingTarget(long callbackId, File desired, long time) {
+        PendingTarget(long callbackId, File desired, long time, Map<String, FileStamp> before) {
             this.callbackId = callbackId;
             this.desired = desired;
             this.time = time;
+            this.before = before;
+        }
+    }
+
+    private static final class FileStamp {
+        final long length;
+        final long modified;
+
+        FileStamp(long length, long modified) {
+            this.length = length;
+            this.modified = modified;
         }
     }
 
