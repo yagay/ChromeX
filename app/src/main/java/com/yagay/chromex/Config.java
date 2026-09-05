@@ -2,6 +2,11 @@ package com.yagay.chromex;
 
 import android.content.SharedPreferences;
 
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.service.XposedService;
 
@@ -34,6 +39,9 @@ public final class Config {
     public static final String AUTO_OPEN_VIDEO = "auto_open_video";
     public static final String AUTO_OPEN_AUDIO = "auto_open_audio";
     public static final String AUTO_OPEN_EBOOK = "auto_open_ebook";
+
+    /** Chromium-family packages explicitly selected from ChromeX's dynamic scope list. */
+    public static final String DYNAMIC_TARGETS = "dynamic_chromium_targets";
 
     public static final String APK_TOAST = "apk_toast";
     public static final String ALL_DOWNLOAD_TOAST = "all_download_toast";
@@ -84,6 +92,39 @@ public final class Config {
         if (prefs == null) return defaultValue(key);
         try { return prefs.getBoolean(key, defaultValue(key)); }
         catch (Throwable ignored) { return defaultValue(key); }
+    }
+
+    public static Set<String> dynamicTargets(SharedPreferences prefs) {
+        if (prefs == null) return Collections.emptySet();
+        try {
+            Set<String> stored = prefs.getStringSet(DYNAMIC_TARGETS, Collections.emptySet());
+            return stored == null ? Collections.emptySet() : new HashSet<>(stored);
+        } catch (Throwable ignored) {
+            return Collections.emptySet();
+        }
+    }
+
+    public static boolean isDynamicTarget(SharedPreferences prefs, String packageName) {
+        return packageName != null && dynamicTargets(prefs).contains(packageName);
+    }
+
+    public static void addDynamicTargets(SharedPreferences prefs, Collection<String> packages) {
+        updateDynamicTargets(prefs, packages, true);
+    }
+
+    public static void removeDynamicTargets(SharedPreferences prefs, Collection<String> packages) {
+        updateDynamicTargets(prefs, packages, false);
+    }
+
+    private static void updateDynamicTargets(SharedPreferences prefs, Collection<String> packages,
+                                             boolean add) {
+        if (prefs == null || packages == null || packages.isEmpty()) return;
+        try {
+            Set<String> next = new HashSet<>(dynamicTargets(prefs));
+            if (add) next.addAll(packages);
+            else next.removeAll(packages);
+            prefs.edit().putStringSet(DYNAMIC_TARGETS, next).apply();
+        } catch (Throwable ignored) {}
     }
 
     public static boolean defaultValue(String key) {
