@@ -7,6 +7,7 @@ import android.os.Looper;
 import java.io.File;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -15,8 +16,7 @@ import java.util.List;
 
 /** Universal Java history/UI reconciliation after a same-name normalization. */
 final class UniversalDownloadHistoryHooks {
-    private static final String DOWNLOAD_ITEM =
-            "org.chromium.chrome.browser.download.DownloadItem";
+    private static final String DOWNLOAD_ITEM = ChromiumSemanticAnchors.DOWNLOAD_ITEM;
     private static final int MAX_RECENT_ITEMS = 192;
     private static final long[] PROPAGATE_DELAYS_MS = {0L, 250L, 900L, 2200L};
 
@@ -90,22 +90,38 @@ final class UniversalDownloadHistoryHooks {
                 });
     }
 
+    /**
+     * Modern Chromium commonly R8-renames createOfflineItem. Resolve the materializer by the
+     * stable signature static (DownloadItem)->OfflineItem instead of relying on the method name.
+     */
     private void hookOfflineMaterializer() {
-        if (itemType == null || Reflect.named(itemType, "createOfflineItem").isEmpty()) return;
-        hooks.all(runtime.classLoader, DOWNLOAD_ITEM, "createOfflineItem",
-                "chromex:universal-history:offline-item", chain -> {
-                    Object receiver = chain.getThisObject();
-                    if (enabled()) rememberItem(receiver);
-                    RewriteTarget target = enabled() ? targetFor(receiver) : null;
-                    if (target == null && enabled()) target = firstTarget(chain.getArgs().toArray());
-                    if (enabled()) rewriteArguments(chain.getArgs().toArray());
-                    Object result = chain.proceed();
-                    if (enabled() && result != null) {
-                        if (target != null) rewriteStrings(result, target);
-                        else rewriteOfflineByValue(result);
-                    }
-                    return result;
-                });
+        Method materializer = DownloadOfflineItemBinding.resolve(runtime.classLoader);
+        if (materializer == null) {
+            hooks.warn("universal download history: OfflineItem materializer unresolved");
+            return;
+        }
+        hooks.method(materializer, "chromex:universal-history:offline-item", chain -> {
+            Object[] args = chain.getArgs().toArray();
+            Object item = firstDownloadItem(args);
+            if (enabled()) rememberItem(item);
+            RewriteTarget target = enabled() ? targetFor(item) : null;
+            if (target == null && enabled()) target = firstTarget(args);
+            if (enabled()) rewriteArguments(args);
+            Object result = chain.proceed();
+            if (enabled() && result != null) {
+                if (target != null) rewriteStrings(result, target);
+                else rewriteOfflineByValue(result);
+            }
+            return result;
+        });
+        hooks.info("universal download history OfflineItem materializer="
+                + materializer.getDeclaringClass().getName() + '#' + materializer.getName());
+    }
+
+    private Object firstDownloadItem(Object[] args) {
+        if (args == null || itemType == null) return null;
+        for (Object arg : args) if (arg != null && itemType.isInstance(arg)) return arg;
+        return null;
     }
 
     private void captureService(Object value) {
@@ -220,8 +236,8 @@ final class UniversalDownloadHistoryHooks {
     private void rewriteArguments(Object[] args) {
         if (args == null) return;
         for (Object arg : args) {
-            if (arg instanceof List<?>) rewriteListItems((List<?>) arg);
-            else rewriteObject(arg);
+            if (arg instanceof List<?>) rewriteList((List<?>) arg);
+            else rewriteByRegistry(arg);
         }
     }
 
@@ -229,62 +245,107 @@ final class UniversalDownloadHistoryHooks {
         if (args == null) return;
         for (Object arg : args) {
             if (arg instanceof List<?>) rewriteAndDedupe((List<?>) arg);
-            else rewriteObject(arg);
+            else rewriteByRegistry(arg);
         }
     }
 
-    private void rewriteListItems(List<?> list) {
+    private void rewriteList(List<?> list) {
         if (list == null) return;
-        for (Object item : new ArrayList<>(list)) rewriteObject(item);
+        for (Object value : new ArrayList<>(list)) rewriteByRegistry(value);
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
     private void rewriteAndDedupe(List<?> list) {
-        if (list == null || list.isEmpty()) return;
-        ArrayList<Entry> entries = new ArrayList<>();
-        long sequence = 0L;
+        if (list == null || list.size() < 1) return;
+        rewriteList(list);
+        HashMap<String, Object> winners = new HashMap<>();
+        ArrayList<Object> remove = new ArrayList<>();
         for (Object value : new ArrayList<>(list)) {
-            Object item = asDownloadItem(value);
-            if (item == null) continue;
-            rememberItem(item);
-            RewriteTarget target = targetFor(item);
-            if (target != null) rewriteTarget(item, target);
-            String logical = logicalPath(infoPath(downloadInfoFrom(item)));
-            if (logical != null) {
-                entries.add(new Entry(value, logical, itemTimestamp(item), ++sequence));
+            String key = logicalPath(value);
+            if (key == null) continue;
+            Object previous = winners.get(key);
+            if (previous == null) {
+                winners.put(key, value);
+                continue;
             }
+            Object winner = newer(previous, value);
+            Object loser = winner == previous ? value : previous;
+            winners.put(key, winner);
+            remove.add(loser);
         }
-        if (entries.isEmpty()) return;
-
-        HashMap<String, Entry> winners = new HashMap<>();
-        for (Entry entry : entries) {
-            Entry current = winners.get(entry.logicalPath);
-            if (current == null || entry.timestamp > current.timestamp
-                    || (entry.timestamp == current.timestamp && entry.sequence > current.sequence)) {
-                winners.put(entry.logicalPath, entry);
-            }
-        }
+        if (remove.isEmpty()) return;
         try {
-            Iterator<?> iterator = list.iterator();
-            while (iterator.hasNext()) {
-                Object value = iterator.next();
-                Entry entry = find(entries, value);
-                if (entry == null) continue;
-                Entry winner = winners.get(entry.logicalPath);
-                if (winner != null && winner.value != value) {
-                    iterator.remove();
-                    hooks.info("download history deduped row: "
-                            + new File(entry.logicalPath).getName());
-                }
-            }
+            ((List) list).removeAll(remove);
+            hooks.info("download history deduped rows=" + remove.size());
         } catch (Throwable t) {
             hooks.warn("download history dedupe skipped: " + t.getClass().getSimpleName());
         }
     }
 
-    private void rewriteObject(Object value) {
-        rememberItem(value);
+    private Object newer(Object a, Object b) {
+        long ta = timestamp(a);
+        long tb = timestamp(b);
+        return tb > ta ? b : a;
+    }
+
+    private long timestamp(Object owner) {
+        if (owner == null) return Long.MIN_VALUE;
+        long best = Long.MIN_VALUE;
+        Class<?> type = owner.getClass();
+        while (type != null && type != Object.class) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType() != long.class) continue;
+                try {
+                    field.setAccessible(true);
+                    long value = field.getLong(owner);
+                    if (value > 946684800000L && value < 4102444800000L && value > best) best = value;
+                } catch (Throwable ignored) {}
+            }
+            type = type.getSuperclass();
+        }
+        return best;
+    }
+
+    private void rewriteByRegistry(Object value) {
+        if (value == null) return;
+        Object item = asDownloadItem(value);
+        if (item != null) rememberItem(item);
         RewriteTarget target = targetFor(value);
         if (target != null) rewriteTarget(value, target);
+    }
+
+    private RewriteTarget targetFor(Object owner) {
+        if (owner == null) return null;
+        Object info = downloadInfoFrom(owner);
+        if (info == null && infoType != null && infoType.isInstance(owner)) info = owner;
+        String path = infoPath(info);
+        if (path == null) path = firstAbsolutePath(owner);
+        if (path == null) return null;
+        String mapped = DownloadNormalizationRegistry.resolve(path);
+        if (mapped == null || mapped.equals(path)) return restartFallback(path);
+        try {
+            File target = new File(mapped).getCanonicalFile();
+            File old = new File(path).getCanonicalFile();
+            if (!target.exists() || !target.isFile()) return null;
+            return new RewriteTarget(old.getAbsolutePath(), old.getName(), target);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private RewriteTarget restartFallback(String path) {
+        try {
+            File old = new File(path).getCanonicalFile();
+            if (old.exists()) return null;
+            String base = DownloadNamePolicy.originalNameFromUniquified(old.getName());
+            if (base == null) return null;
+            File target = new File(old.getParentFile(), base).getCanonicalFile();
+            if (!target.exists() || !target.isFile()) return null;
+            DownloadNormalizationRegistry.register(old, target);
+            return new RewriteTarget(old.getAbsolutePath(), old.getName(), target);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private RewriteTarget firstTarget(Object[] args) {
@@ -296,79 +357,30 @@ final class UniversalDownloadHistoryHooks {
         return null;
     }
 
-    private RewriteTarget targetFor(Object value) {
-        if (value == null) return null;
-        Object info = infoType != null && infoType.isInstance(value) ? value : downloadInfoFrom(value);
-        if (info == null) return null;
-        DownloadInfoAccessor.Values values = DownloadInfoAccessor.read(info, profile);
-        String path = values.path;
-        if (path == null || path.isBlank()) return null;
-        String mapped = resolveMappedPath(path);
-        if (mapped == null) return null;
-        try {
-            File oldFile = new File(path).getCanonicalFile();
-            File target = new File(mapped).getCanonicalFile();
-            if (!target.exists() || !target.isFile()) return null;
-            String oldName = values.name == null ? oldFile.getName() : values.name;
-            return new RewriteTarget(oldFile.getAbsolutePath(), oldName, target);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private String resolveMappedPath(String path) {
+    private void rewriteOfflineByValue(Object owner) {
+        if (owner == null) return;
+        String path = firstAbsolutePath(owner);
+        if (path == null) return;
         String mapped = DownloadNormalizationRegistry.resolve(path);
-        if (mapped != null) return mapped;
-        try {
-            File old = new File(path).getCanonicalFile();
-            String original = DownloadNamePolicy.originalNameFromUniquified(old.getName());
-            if (original == null || old.exists()) return null;
-            File target = new File(old.getParentFile(), original).getCanonicalFile();
-            return target.exists() && target.isFile() ? target.getAbsolutePath() : null;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        if (mapped == null || mapped.equals(path)) return;
+        RewriteTarget target = exactTarget(path, mapped);
+        if (target != null) rewriteStrings(owner, target);
     }
 
-    private void rewriteTarget(Object value, RewriteTarget target) {
-        if (value == null || target == null) return;
-        Object info = infoType != null && infoType.isInstance(value) ? value : downloadInfoFrom(value);
-        boolean infoChanged = info != null && DownloadInfoAccessor.rewrite(info, profile, target.target);
-        boolean ownerChanged = value != info && rewriteStrings(value, target);
-        if (infoChanged || ownerChanged) {
-            hooks.info("download history rewritten: " + target.oldName
-                    + " -> " + target.target.getName()
-                    + " owner=" + value.getClass().getName());
+    private void rewriteTarget(Object owner, RewriteTarget target) {
+        if (owner == null || target == null) return;
+        if (infoType != null && infoType.isInstance(owner)) {
+            DownloadInfoAccessor.rewrite(owner, profile, target.target);
         }
+        Object info = downloadInfoFrom(owner);
+        if (info != null) DownloadInfoAccessor.rewrite(info, profile, target.target);
+        rewriteStrings(owner, target);
     }
 
-    private void rewriteOfflineByValue(Object offline) {
-        if (offline == null) return;
-        Class<?> type = offline.getClass();
-        while (type != null && type != Object.class) {
-            for (Field field : type.getDeclaredFields()) {
-                if (Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) continue;
-                try {
-                    field.setAccessible(true);
-                    Object raw = field.get(offline);
-                    if (!(raw instanceof String)) continue;
-                    String text = (String) raw;
-                    if (!text.startsWith("/")) continue;
-                    String mapped = resolveMappedPath(text);
-                    if (mapped == null) continue;
-                    File target = new File(mapped).getCanonicalFile();
-                    rewriteStrings(offline, new RewriteTarget(
-                            new File(text).getCanonicalPath(), new File(text).getName(), target));
-                    return;
-                } catch (Throwable ignored) {}
-            }
-            type = type.getSuperclass();
-        }
-    }
-
-    private boolean rewriteStrings(Object owner, RewriteTarget target) {
-        if (owner == null || target == null) return false;
-        boolean changed = false;
+    private void rewriteStrings(Object owner, RewriteTarget target) {
+        if (owner == null || target == null) return;
+        String newPath = target.target.getAbsolutePath();
+        String newName = target.target.getName();
         Class<?> type = owner.getClass();
         while (type != null && type != Object.class) {
             for (Field field : type.getDeclaredFields()) {
@@ -379,41 +391,29 @@ final class UniversalDownloadHistoryHooks {
                     if (!(raw instanceof String)) continue;
                     String value = (String) raw;
                     String replacement = null;
-                    if (target.oldPath.equals(value)) replacement = target.target.getAbsolutePath();
-                    else if (target.oldName.equals(value)) replacement = target.target.getName();
-                    else if (("file://" + target.oldPath).equals(value)) {
-                        replacement = "file://" + target.target.getAbsolutePath();
-                    }
-                    if (replacement != null && !replacement.equals(value)) {
-                        field.set(owner, replacement);
-                        changed = true;
-                    }
+                    if (samePath(value, target.oldPath)) replacement = newPath;
+                    else if (target.oldName.equals(value)) replacement = newName;
+                    else if (("file://" + target.oldPath).equals(value)) replacement = "file://" + newPath;
+                    if (replacement != null && !replacement.equals(value)) field.set(owner, replacement);
                 } catch (Throwable ignored) {}
             }
             type = type.getSuperclass();
         }
-        return changed;
     }
 
     private boolean containsOldValue(Object owner, RewriteTarget target) {
         if (owner == null || target == null) return false;
-        Object info = infoType != null && infoType.isInstance(owner) ? owner : downloadInfoFrom(owner);
-        if (info != null && containsOldString(info, target)) return true;
-        return owner != info && containsOldString(owner, target);
-    }
-
-    private boolean containsOldString(Object owner, RewriteTarget target) {
-        Class<?> type = owner == null ? null : owner.getClass();
+        Class<?> type = owner.getClass();
         while (type != null && type != Object.class) {
             for (Field field : type.getDeclaredFields()) {
                 if (Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) continue;
                 try {
                     field.setAccessible(true);
                     Object raw = field.get(owner);
-                    if (!(raw instanceof String)) continue;
-                    String value = (String) raw;
-                    if (target.oldPath.equals(value) || target.oldName.equals(value)
-                            || ("file://" + target.oldPath).equals(value)) return true;
+                    if (raw instanceof String) {
+                        String value = (String) raw;
+                        if (samePath(value, target.oldPath) || target.oldName.equals(value)) return true;
+                    }
                 } catch (Throwable ignored) {}
             }
             type = type.getSuperclass();
@@ -422,82 +422,74 @@ final class UniversalDownloadHistoryHooks {
     }
 
     private Object asDownloadItem(Object value) {
-        return value != null && itemType != null && itemType.isInstance(value) ? value : null;
+        if (value == null || itemType == null) return null;
+        if (itemType.isInstance(value)) return value;
+        return null;
     }
 
-    private Object downloadInfoFrom(Object value) {
-        Object item = asDownloadItem(value);
-        if (item == null || infoType == null) return null;
-        try {
-            Object stable = Reflect.call(item, "getDownloadInfo");
-            if (stable != null && infoType.isInstance(stable)) return stable;
-        } catch (Throwable ignored) {}
-        return Reflect.findFieldValueByType(item, infoType);
-    }
-
-    private String infoPath(Object info) {
-        return info == null ? null : DownloadInfoAccessor.read(info, profile).path;
-    }
-
-    private String logicalPath(String path) {
-        if (path == null || path.isBlank() || !path.startsWith("/")) return null;
-        String mapped = DownloadNormalizationRegistry.logicalPath(path);
-        if (mapped != null && !mapped.equals(path)) return mapped;
-        String fallback = resolveMappedPath(path);
-        if (fallback != null) return fallback;
-        try { return new File(path).getCanonicalPath(); }
-        catch (Throwable ignored) { return null; }
-    }
-
-    private long itemTimestamp(Object item) {
-        long best = 0L;
-        Class<?> type = item == null ? null : item.getClass();
+    private Object downloadInfoFrom(Object owner) {
+        if (owner == null || infoType == null) return null;
+        if (infoType.isInstance(owner)) return owner;
+        Class<?> type = owner.getClass();
         while (type != null && type != Object.class) {
             for (Field field : type.getDeclaredFields()) {
-                if (Modifier.isStatic(field.getModifiers()) || field.getType() != long.class) continue;
+                if (Modifier.isStatic(field.getModifiers()) || !infoType.isAssignableFrom(field.getType())) continue;
                 try {
                     field.setAccessible(true);
-                    long value = field.getLong(item);
-                    if (value >= 946684800000L && value <= 4102444800000L && value > best) best = value;
+                    Object value = field.get(owner);
+                    if (value != null) return value;
                 } catch (Throwable ignored) {}
             }
             type = type.getSuperclass();
         }
-        return best;
-    }
-
-    private static boolean samePath(String first, String second) {
-        if (first == null || second == null) return false;
-        try { return new File(first).getCanonicalFile().equals(new File(second).getCanonicalFile()); }
-        catch (Throwable ignored) { return first.equals(second); }
-    }
-
-    private static Entry find(List<Entry> entries, Object value) {
-        for (Entry entry : entries) if (entry.value == value) return entry;
         return null;
+    }
+
+    private String infoPath(Object info) {
+        return DownloadInfoAccessor.read(info, profile).path;
+    }
+
+    private String firstAbsolutePath(Object owner) {
+        if (owner == null) return null;
+        Class<?> type = owner.getClass();
+        while (type != null && type != Object.class) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) continue;
+                try {
+                    field.setAccessible(true);
+                    Object raw = field.get(owner);
+                    if (raw instanceof String && ((String) raw).startsWith("/")) return (String) raw;
+                } catch (Throwable ignored) {}
+            }
+            type = type.getSuperclass();
+        }
+        return null;
+    }
+
+    private String logicalPath(Object owner) {
+        Object info = downloadInfoFrom(owner);
+        String path = infoPath(info);
+        if (path == null) path = firstAbsolutePath(owner);
+        if (path == null) return null;
+        String mapped = DownloadNormalizationRegistry.resolve(path);
+        return mapped == null ? path : mapped;
+    }
+
+    private static boolean samePath(String a, String b) {
+        if (a == null || b == null) return false;
+        try { return new File(a).getCanonicalPath().equals(new File(b).getCanonicalPath()); }
+        catch (Throwable ignored) { return a.equals(b); }
     }
 
     private static final class RewriteTarget {
         final String oldPath;
         final String oldName;
         final File target;
+
         RewriteTarget(String oldPath, String oldName, File target) {
             this.oldPath = oldPath;
             this.oldName = oldName;
             this.target = target;
-        }
-    }
-
-    private static final class Entry {
-        final Object value;
-        final String logicalPath;
-        final long timestamp;
-        final long sequence;
-        Entry(Object value, String logicalPath, long timestamp, long sequence) {
-            this.value = value;
-            this.logicalPath = logicalPath;
-            this.timestamp = timestamp;
-            this.sequence = sequence;
         }
     }
 }
