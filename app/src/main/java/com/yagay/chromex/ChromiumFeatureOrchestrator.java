@@ -10,7 +10,6 @@ final class ChromiumFeatureOrchestrator {
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
-    private OfflineContentRenameBinding renameBinding;
 
     ChromiumFeatureOrchestrator(ChromiumProfile profile, ResolvedBindings bindings,
                                 ChromeRuntime runtime, HookSupport hooks,
@@ -24,9 +23,7 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installDownloadSourceBindings();
-        installOverwriteConfirmationPolicy();
-        installSameNameOverwrite();
+        installOverwriteDuplicateHook();
         installCompletionNameNormalizer();
         installOfflineDisplayNameNormalizer();
         installDownloadHistory();
@@ -36,31 +33,15 @@ final class ChromiumFeatureOrchestrator {
                 + " profile=" + profile.label());
     }
 
-    private void installDownloadSourceBindings() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
-                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI, 60)) return;
-        install("OfflineContent source binding", () -> {
-            renameBinding = new OfflineContentRenameBinding(profile, runtime, hooks);
-            renameBinding.install();
-        });
-    }
-
-    private void installOverwriteConfirmationPolicy() {
+    /**
+     * Same-name overwrite deliberately has one duplicate-conflict hook. We no longer pre-vacate a
+     * guessed filesystem directory or install an OfflineContent rename hook here; the authoritative
+     * artifact is normalized only after Chromium commits it.
+     */
+    private void installOverwriteDuplicateHook() {
         if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 60)) return;
-        install("overwrite duplicate confirmation policy", () ->
-                OverwriteConfirmationPolicy.install(runtime, hooks, prefs));
-    }
-
-    private void installSameNameOverwrite() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 70)
-                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 70)
-                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_COMPLETION, 70)) {
-            skip("same-name overwrite", "duplicate/info/legacy-completion capability incomplete");
-            return;
-        }
-        install("same-name overwrite", () ->
-                new NativeFirstSameNameOverwriteHooks(
-                        profile, runtime, hooks, prefs, renameBinding).install());
+        install("unified overwrite duplicate hook", () ->
+                new UniversalOverwriteDuplicateHook(profile, runtime, hooks, prefs).install());
     }
 
     private void installCompletionNameNormalizer() {
