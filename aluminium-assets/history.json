@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "versions": [
+    {
+      "versionName": "145.0.7632.218",
+      "versionCode": 763221864,
+      "tag": "aluminium-145",
+      "build": "CL2B.260330.037",
+      "status": "stable"
+    }
+  ]
+}
