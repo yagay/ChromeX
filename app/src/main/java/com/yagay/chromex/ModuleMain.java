@@ -70,9 +70,10 @@ public final class ModuleMain extends XposedModule {
             }
         });
         installFeature("download history rewrite", () -> {
-            new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install();
             if (profile.isAdaptive()) {
                 new AdaptiveDownloadHistoryCompat(runtime, hooks, prefs).install();
+            } else {
+                new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install();
             }
         });
         installFeature("Chromium tabs/homepage", () -> {
