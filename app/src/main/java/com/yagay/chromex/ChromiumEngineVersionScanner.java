@@ -30,7 +30,7 @@ final class ChromiumEngineVersionScanner {
                 if (entry.isDirectory() || name == null
                         || !name.startsWith("classes") || !name.endsWith(".dex")) continue;
                 try (InputStream in = zip.getInputStream(entry)) {
-                    String candidate = bestInBytes(in.readAllBytes());
+                    String candidate = bestInBytes(IoCompat.readFully(in));
                     if (candidate != null && (best == null || compare(candidate, best) > 0)) {
                         best = candidate;
                     }
@@ -39,7 +39,7 @@ final class ChromiumEngineVersionScanner {
         } catch (Throwable zipFailure) {
             // Some test/custom runtimes can point directly at a dex file rather than an APK.
             try (FileInputStream in = new FileInputStream(file)) {
-                best = bestInBytes(in.readAllBytes());
+                best = bestInBytes(IoCompat.readFully(in));
             } catch (Throwable ignored) {
                 if (hooks != null) hooks.warn("adaptive engine dex scan failed: "
                         + zipFailure.getClass().getSimpleName());
