@@ -18,11 +18,42 @@ public final class Config {
     public static final String BYPASS_POLICY = "bypass_policy";
     public static final String BYPASS_LOCATION = "bypass_location";
     public static final String BYPASS_OPEN = "bypass_open";
-    public static final String AUTO_INSTALL_APK = "auto_install_apk";
+
+    // Keep the original preference key for APK so existing users retain their choice after the
+    // feature is expanded from "auto install APK" to "auto open selected download types".
+    public static final String AUTO_OPEN_APK = "auto_install_apk";
+    @Deprecated public static final String AUTO_INSTALL_APK = AUTO_OPEN_APK;
+    public static final String AUTO_OPEN_APP_BUNDLE = "auto_open_app_bundle";
+    public static final String AUTO_OPEN_PDF = "auto_open_pdf";
+    public static final String AUTO_OPEN_ARCHIVE = "auto_open_archive";
+    public static final String AUTO_OPEN_DOCUMENT = "auto_open_document";
+    public static final String AUTO_OPEN_SPREADSHEET = "auto_open_spreadsheet";
+    public static final String AUTO_OPEN_PRESENTATION = "auto_open_presentation";
+    public static final String AUTO_OPEN_TEXT = "auto_open_text";
+    public static final String AUTO_OPEN_IMAGE = "auto_open_image";
+    public static final String AUTO_OPEN_VIDEO = "auto_open_video";
+    public static final String AUTO_OPEN_AUDIO = "auto_open_audio";
+    public static final String AUTO_OPEN_EBOOK = "auto_open_ebook";
+
     public static final String APK_TOAST = "apk_toast";
     public static final String ALL_DOWNLOAD_TOAST = "all_download_toast";
     public static final String HIDE_TRANSLATE = "hide_translate";
     public static final String DIAGNOSTIC_MODE = "diagnostic_mode";
+
+    public static final String[] AUTO_OPEN_KEYS = {
+            AUTO_OPEN_APK,
+            AUTO_OPEN_APP_BUNDLE,
+            AUTO_OPEN_PDF,
+            AUTO_OPEN_ARCHIVE,
+            AUTO_OPEN_DOCUMENT,
+            AUTO_OPEN_SPREADSHEET,
+            AUTO_OPEN_PRESENTATION,
+            AUTO_OPEN_TEXT,
+            AUTO_OPEN_IMAGE,
+            AUTO_OPEN_VIDEO,
+            AUTO_OPEN_AUDIO,
+            AUTO_OPEN_EBOOK
+    };
 
     private Config() {}
 
@@ -56,18 +87,24 @@ public final class Config {
     }
 
     public static boolean defaultValue(String key) {
-        // Safety-sensitive actions are explicit opt-in on a fresh install. Existing user choices
-        // remain untouched because SharedPreferences values always override these defaults.
+        // Safety-sensitive actions and every automatic file launch are explicit opt-in on a fresh
+        // install. Existing APK users keep their old value because AUTO_OPEN_APK reuses that key.
         if (BYPASS_DANGEROUS.equals(key)
                 || BYPASS_INSECURE.equals(key)
                 || BYPASS_POLICY.equals(key)
                 || BYPASS_OPEN.equals(key)
-                || AUTO_INSTALL_APK.equals(key)
+                || isAutoOpenKey(key)
                 || DIAGNOSTIC_MODE.equals(key)
                 || ALL_DOWNLOAD_TOAST.equals(key)
                 || OVERWRITE_DUPLICATE.equals(key)) {
             return false;
         }
         return true;
+    }
+
+    private static boolean isAutoOpenKey(String key) {
+        if (key == null) return false;
+        for (String value : AUTO_OPEN_KEYS) if (value.equals(key)) return true;
+        return false;
     }
 }
