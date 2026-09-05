@@ -29,6 +29,7 @@ final class BrowserCapabilities {
         DOWNLOAD_INFO,
         DOWNLOAD_COMPLETION,
         DOWNLOAD_DUPLICATE_CONFLICT,
+        DOWNLOAD_CONFLICT_POLICY,
         DOWNLOAD_HISTORY,
         DOWNLOAD_OFFLINE_UI,
         DOWNLOAD_RENAME,
