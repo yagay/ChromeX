@@ -1,8 +1,13 @@
 package com.yagay.chromex;
 
+import android.app.Activity;
 import android.app.Application;
 import android.content.Intent;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 
+import java.lang.ref.WeakReference;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.CopyOnWriteArraySet;
@@ -17,6 +22,9 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
 
     private static final CopyOnWriteArraySet<Listener> LISTENERS = new CopyOnWriteArraySet<>();
     private static volatile XposedService service;
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private WeakReference<Activity> foregroundActivity = new WeakReference<>(null);
 
     public static XposedService getService() {
         return service;
@@ -35,6 +43,21 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
     public void onCreate() {
         super.onCreate();
         grantDiagnosticAccess(Collections.singletonList(Chrome145.PACKAGE));
+        registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(Activity activity, Bundle state) {}
+            @Override public void onActivityStarted(Activity activity) {}
+            @Override public void onActivityResumed(Activity activity) {
+                foregroundActivity = new WeakReference<>(activity);
+                attachInstallerEntrySoon(activity);
+            }
+            @Override public void onActivityPaused(Activity activity) {}
+            @Override public void onActivityStopped(Activity activity) {}
+            @Override public void onActivitySaveInstanceState(Activity activity, Bundle outState) {}
+            @Override public void onActivityDestroyed(Activity activity) {
+                Activity current = foregroundActivity.get();
+                if (current == activity) foregroundActivity = new WeakReference<>(null);
+            }
+        });
         XposedServiceHelper.registerListener(this);
     }
 
@@ -44,12 +67,21 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
         try { grantDiagnosticAccess(value.getScope()); }
         catch (Throwable ignored) {}
         for (Listener listener : LISTENERS) listener.onServiceChanged(value);
+        Activity activity = foregroundActivity.get();
+        if (activity != null) attachInstallerEntrySoon(activity);
     }
 
     @Override
     public void onServiceDied(XposedService value) {
         if (service == value) service = null;
         for (Listener listener : LISTENERS) listener.onServiceChanged(service);
+        Activity activity = foregroundActivity.get();
+        if (activity != null) attachInstallerEntrySoon(activity);
+    }
+
+    private void attachInstallerEntrySoon(Activity activity) {
+        main.post(() -> AluminiumInstallerEntry.attach(activity));
+        main.postDelayed(() -> AluminiumInstallerEntry.attach(activity), 350L);
     }
 
     private void grantDiagnosticAccess(Collection<String> packages) {
