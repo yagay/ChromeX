@@ -1,0 +1,22 @@
+{
+  "tag": "aluminium-145",
+  "build": "CL2B.260330.037",
+  "versionName": "145.0.7632.218",
+  "versionCode": 763221864,
+  "assets": [
+    {
+      "name": "Chrome-Aluminium-145.0.7632.218-arm64.apk",
+      "package": "com.android.chrome",
+      "size": 58145919,
+      "sha256": "e98864496f5b56d59253f5da997f8d509a47da0d4ce2a2eb98b16a5538a9d387",
+      "certificateSha256": "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83"
+    },
+    {
+      "name": "TrichromeLibrary-Aluminium-145.0.7632.218-arm64.apk",
+      "package": "com.google.android.trichromelibrary",
+      "size": 204289850,
+      "sha256": "dd620578ab8ae923b5262d5d9803acf821e5a1e9f56ef33d13a17acb91577008",
+      "certificateSha256": "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1"
+    }
+  ]
+}
