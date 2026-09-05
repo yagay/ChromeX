@@ -1,0 +1,26 @@
+name: Chromium 152 Desktop Android Full Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, chromium-builder]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare scripts
+        run: chmod +x chromium-desktop-152/build.sh
+      - name: Build Chromium 152 Desktop Android Extensions
+        env:
+          CHROMIUM_WORKDIR: ${{ runner.temp }}/chromium152
+          NINJA_JOBS: '$(nproc)'
+        run: |
+          export NINJA_JOBS="$(nproc)"
+          chromium-desktop-152/build.sh
+      - name: Upload Chromium 152 Desktop Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chromium-152-Desktop-Android-Extensions
+          path: ${{ runner.temp }}/chromium152/artifacts/*
+          if-no-files-found: error
