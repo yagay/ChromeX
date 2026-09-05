@@ -19,7 +19,7 @@ final class ChromiumSemanticAnchors {
             "org.chromium.components.download.DownloadCollectionBridge";
 
     static final String OFFLINE_RENAME_SEMANTIC =
-            "org_chromium_components_offline_items_collection_OfflineContentAggregatorBridge_renameItem";
+            "org_chromium_components_offline_1items_1collection_OfflineContentAggregatorBridge_renameItem";
 
     static final String[] HOMEPAGE_STRINGS = {
             "Chrome.Homepage.CustomGurl",
