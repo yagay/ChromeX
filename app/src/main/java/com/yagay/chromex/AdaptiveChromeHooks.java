@@ -18,8 +18,8 @@ import io.github.libxposed.api.XposedModule;
 
 /**
  * Conservative hooks for Chrome builds without a verified release profile. This path deliberately
- * avoids every release-specific R8 short name. Stable APIs are used directly and DexKit is used
- * only for distinctive structural lookups. Unsupported features fail independently.
+ * avoids release-specific R8 short names. Stable APIs are used directly and DexKit is used only
+ * for distinctive structural lookups. Unsupported features fail independently.
  */
 final class AdaptiveChromeHooks {
     private final HookSupport hooks;
@@ -85,7 +85,7 @@ final class AdaptiveChromeHooks {
                             Intent intent = activity.getIntent();
                             if (intent != null && Intent.ACTION_MAIN.equals(intent.getAction())
                                     && intent.getData() == null) {
-                                main.postDelayed(this::settleColdStart, 1400L);
+                                main.postDelayed(() -> settleColdStart(activity), 1400L);
                             }
                         }
                     }
@@ -105,86 +105,68 @@ final class AdaptiveChromeHooks {
     }
 
     /**
-     * Capture regular/incognito TabModels without knowing the obfuscated selector class or field.
-     * ChromeTabbedActivity keeps a selector object that exposes a one-boolean method returning the
-     * stable TabModel API. We invoke it only when that structural candidate is unique.
+     * Find the selector structurally instead of depending on fields such as O2 or classes such as
+     * k3r. A selector candidate must expose a unique (boolean) -> TabModel method.
      */
     private void captureModelsFromActivity(Activity activity) {
         if (activity == null) return;
         try {
-            Class<?> bridgeType = Reflect.cls(runtime.classLoader, Chrome145.TAB_MODEL);
-            Class<?> apiType = Reflect.cls(runtime.classLoader, Chrome145.TAB_MODEL_API);
-            ArrayList<SelectorCall> selectors = new ArrayList<>();
-
-            Class<?> owner = activity.getClass();
-            while (owner != null && owner != Object.class) {
-                for (Field field : owner.getDeclaredFields()) {
+            Class<?> tabModelApi = Reflect.cls(runtime.classLoader, Chrome145.TAB_MODEL_API);
+            Class<?> c = activity.getClass();
+            while (c != null && c != Object.class) {
+                for (Field field : c.getDeclaredFields()) {
                     if (Modifier.isStatic(field.getModifiers())) continue;
-                    Object value;
+                    Object candidate;
                     try {
                         field.setAccessible(true);
-                        value = field.get(activity);
+                        candidate = field.get(activity);
                     } catch (Throwable ignored) {
                         continue;
                     }
-                    if (value == null) continue;
-                    if (bridgeType.isInstance(value) || apiType.isInstance(value)) {
-                        remember(value);
-                        continue;
+                    if (candidate == null) continue;
+                    Method selector = findModelSelector(candidate.getClass(), tabModelApi);
+                    if (selector == null) continue;
+                    try {
+                        Object regular = selector.invoke(candidate, false);
+                        if (regular != null) remember(regular);
+                    } catch (Throwable ignored) {}
+                    try {
+                        Object incognito = selector.invoke(candidate, true);
+                        if (incognito != null) remember(incognito);
+                    } catch (Throwable ignored) {}
+                    if (!knownModels().isEmpty()) {
+                        hooks.info("adaptive TabModel selector resolved structurally: "
+                                + candidate.getClass().getName() + "#" + selector.getName());
+                        return;
                     }
-
-                    Method candidate = findModelSelector(value.getClass(), bridgeType, apiType);
-                    if (candidate != null) selectors.add(new SelectorCall(value, candidate));
                 }
-                owner = owner.getSuperclass();
-            }
-
-            if (selectors.size() != 1) {
-                if (selectors.size() > 1) {
-                    hooks.warn("adaptive TabModel selector ambiguous: candidates=" + selectors.size());
-                }
-                return;
-            }
-
-            SelectorCall selector = selectors.get(0);
-            for (boolean incognito : new boolean[]{false, true}) {
-                try {
-                    Object model = selector.method.invoke(selector.owner, incognito);
-                    if (model != null) remember(model);
-                } catch (Throwable ignored) {}
+                c = c.getSuperclass();
             }
         } catch (Throwable t) {
-            hooks.warn("adaptive TabModel capture unavailable: " + t.getClass().getSimpleName());
+            hooks.warn("adaptive TabModel selector unresolved: " + t.getClass().getSimpleName());
         }
     }
 
-    private Method findModelSelector(Class<?> type, Class<?> bridgeType, Class<?> apiType) {
+    private Method findModelSelector(Class<?> type, Class<?> tabModelApi) {
         Method found = null;
-        Class<?> current = type;
-        while (current != null && current != Object.class) {
-            for (Method method : current.getDeclaredMethods()) {
+        Class<?> c = type;
+        while (c != null && c != Object.class) {
+            for (Method method : c.getDeclaredMethods()) {
                 if (Modifier.isStatic(method.getModifiers())) continue;
-                Class<?>[] params = method.getParameterTypes();
-                if (params.length != 1 || params[0] != boolean.class) continue;
-                Class<?> result = method.getReturnType();
-                if (!(bridgeType.isAssignableFrom(result) || apiType.isAssignableFrom(result))) {
-                    continue;
-                }
-                if (found != null && !sameMethod(found, method)) return null;
+                Class<?>[] p = method.getParameterTypes();
+                if (p.length != 1 || p[0] != boolean.class) continue;
+                if (!tabModelApi.isAssignableFrom(method.getReturnType())) continue;
+                if (found != null) return null;
                 method.setAccessible(true);
                 found = method;
             }
-            current = current.getSuperclass();
+            c = c.getSuperclass();
         }
         return found;
     }
 
-    private static boolean sameMethod(Method a, Method b) {
-        return a.getName().equals(b.getName())
-                && a.getDeclaringClass() == b.getDeclaringClass();
-    }
-
-    private void settleColdStart() {
+    private void settleColdStart(Activity activity) {
+        captureModelsFromActivity(activity);
         Object regular = regularModel();
         Object home = homepageGurl();
         if (regular == null || home == null) return;
@@ -253,13 +235,8 @@ final class AdaptiveChromeHooks {
                 if (factory == null) return null;
                 owner = factory.invoke(null);
             }
-            if (getter.getParameterCount() == 2) {
-                return getter.invoke(owner, false, false);
-            }
-            if (getter.getParameterCount() == 1) {
-                return getter.invoke(owner, false);
-            }
-            return null;
+            // Structural resolver is (incognito, forZeroTabs) -> GURL.
+            return getter.invoke(owner, false, false);
         } catch (Throwable t) {
             hooks.warn("adaptive homepage invocation failed: " + t.getClass().getSimpleName());
             return null;
@@ -355,7 +332,7 @@ final class AdaptiveChromeHooks {
 
     private String gurlText(Object gurl) {
         if (gurl == null) return null;
-        for (String name : new String[]{"getSpec", "j"}) {
+        for (String name : new String[]{"getSpec", "j", "n"}) {
             try {
                 Object value = Reflect.call(gurl, name);
                 if (value instanceof String) return (String) value;
@@ -372,15 +349,5 @@ final class AdaptiveChromeHooks {
     private boolean isNtp(String value) {
         return value != null && (value.startsWith("chrome-native://newtab")
                 || value.startsWith("chrome://newtab"));
-    }
-
-    private static final class SelectorCall {
-        final Object owner;
-        final Method method;
-
-        SelectorCall(Object owner, Method method) {
-            this.owner = owner;
-            this.method = method;
-        }
     }
 }
