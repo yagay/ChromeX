@@ -23,9 +23,7 @@ public final class ModuleMain extends XposedModule {
         if (!Chrome145.PACKAGE.equals(param.getPackageName())) return;
         if (!param.isFirstPackage()) return;
 
-        // These hooks target Chrome's browser/UI/download Java layer. Installing and scanning the
-        // same targets in privileged/sandbox subprocesses produces false ClassNotFound reports and
-        // lets a later subprocess overwrite the useful browser-process diagnostics.
+        // Browser/UI/download hooks belong only in Chrome's main browser process.
         if (!Chrome145.PACKAGE.equals(processName)) {
             log(Log.INFO, "ChromeX", "skip secondary Chrome process: " + processName);
             return;
@@ -41,22 +39,30 @@ public final class ModuleMain extends XposedModule {
         }
         hooks = new HookSupport(this, prefs);
 
-        installFeature("current compatibility", () ->
-                new CurrentChromeHooks(this, hooks, prefs, loader).install());
-        installFeature("tab hooks", () -> new TabHooks(this, hooks, prefs, loader).install());
-        installFeature("download dialog hooks", () ->
-                new DownloadDialogHooks(this, hooks, prefs, loader).install());
-        installFeature("installer hooks", () ->
-                new InstallerHooks(this, hooks, prefs, loader).install());
-        installFeature("banner hooks", () ->
-                new BannerHooks(this, hooks, prefs, loader).install());
+        int major = ChromeVersion.major();
+        if (major == 152) {
+            // All short R8 symbols/native selectors in Chrome152Hooks were verified directly from
+            // Chrome 152.0.7977.75. Do not mix legacy 145 fallbacks into this process: some short
+            // class names are reused by unrelated classes in 152 and could otherwise be mis-hooked.
+            installFeature("Chrome 152 verified profile", () ->
+                    new Chrome152Hooks(this, hooks, prefs, loader).install());
+        } else {
+            installFeature("tab hooks", () -> new TabHooks(this, hooks, prefs, loader).install());
+            installFeature("download dialog hooks", () ->
+                    new DownloadDialogHooks(this, hooks, prefs, loader).install());
+            installFeature("installer hooks", () ->
+                    new InstallerHooks(this, hooks, prefs, loader).install());
+            installFeature("banner hooks", () ->
+                    new BannerHooks(this, hooks, prefs, loader).install());
+            hooks.info("generic Chrome compatibility profile active: " + ChromeVersion.name());
+        }
 
         try {
             Diagnostics.scheduleScan(prefs, loader);
         } catch (Throwable t) {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
-        hooks.info("adaptive Chrome hooks installed in main process; diagnostic IPC is fail-safe");
+        hooks.info("ChromeX hooks installed in main process; diagnostic IPC is fail-safe");
     }
 
     private void installFeature(String name, Runnable installer) {
