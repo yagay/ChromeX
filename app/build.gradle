@@ -2,6 +2,11 @@ plugins {
     id 'com.android.application'
 }
 
+def ciRunText = (System.getenv('GITHUB_RUN_NUMBER') ?: '0').replaceAll('[^0-9]', '')
+def ciRun = ciRunText ? ciRunText.toInteger() : 0
+def gitSha = System.getenv('GITHUB_SHA') ?: 'local'
+def shortSha = gitSha.length() > 12 ? gitSha.substring(0, 12) : gitSha
+
 android {
     namespace 'com.yagay.chromex'
     compileSdk 37
@@ -11,8 +16,14 @@ android {
         applicationId 'com.yagay.chromex'
         minSdk 31
         targetSdk 37
-        versionCode 1
-        versionName '1.0.0'
+        versionCode 1000 + ciRun
+        versionName "1.1.${ciRun}"
+        buildConfigField 'String', 'BUILD_SHA', "\"${shortSha}\""
+        buildConfigField 'String', 'BUILD_RUN', "\"${ciRun}\""
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
