@@ -1,10 +1,12 @@
 package com.yagay.chromex;
 
+import android.content.ContentResolver;
 import android.content.SharedPreferences;
 import android.media.MediaScannerConnection;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 
 import java.io.File;
 import java.lang.reflect.Field;
@@ -29,6 +31,7 @@ final class AdaptiveSameNameOverwriteHooks {
     private static final int MAX_PENDING = 64;
     private static final int MAX_RETRIES = 24;
     private static final long RETRY_MS = 250L;
+    private static final long[] RESIDUAL_CLEANUP_DELAYS_MS = {300L, 1000L, 2500L};
     private static final Object LOCK = new Object();
     private static final List<PendingTarget> PENDING = new ArrayList<>();
 
@@ -147,13 +150,91 @@ final class AdaptiveSameNameOverwriteHooks {
 
         DownloadNormalizationRegistry.register(oldActual, desired);
         rewriteInfoStrings(info, values, oldActual, desired);
-        try {
-            MediaScannerConnection.scanFile(runtime.application,
-                    new String[]{desired.getAbsolutePath()}, null, null);
-        } catch (Throwable ignored) {}
+        refreshMediaIndex(oldActual, desired, "immediate");
+        scheduleResidualCleanup(oldActual, desired);
         hooks.info("adaptive same-name overwrite normalized: " + oldActual.getAbsolutePath()
                 + " -> " + desired.getAbsolutePath() + " via " + replace.detail
                 + " attempt=" + attempt + " metadata=" + values.detail);
+    }
+
+    /**
+     * Chromium forks can publish the completed download to MediaStore after the Java completion
+     * callback. Keep checking only the exact numbered path that was moved in this transaction.
+     * If it reappears, it is a residual of this same overwrite operation, not an unrelated sibling.
+     */
+    private void scheduleResidualCleanup(File oldActual, File desired) {
+        if (oldActual == null || desired == null) return;
+        final File oldPath;
+        final File newPath;
+        try {
+            oldPath = oldActual.getCanonicalFile();
+            newPath = desired.getCanonicalFile();
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (!isSharedFile(oldPath) || !isSharedFile(newPath) || !sameParent(oldPath, newPath)) return;
+        if (!DownloadNamePolicy.matchesUniquifiedName(newPath.getName(), oldPath.getName())) return;
+
+        for (long delay : RESIDUAL_CLEANUP_DELAYS_MS) {
+            main.postDelayed(() -> cleanupResidual(oldPath, newPath, delay), delay);
+        }
+    }
+
+    private void cleanupResidual(File oldPath, File desired, long delay) {
+        try {
+            boolean removedFile = false;
+            if (oldPath.exists() && oldPath.isFile()) {
+                removedFile = oldPath.delete();
+                if (!removedFile) {
+                    hooks.warn("adaptive same-name overwrite residual file could not be removed: "
+                            + oldPath.getAbsolutePath() + " delay=" + delay);
+                }
+            }
+            int removedRows = removeMediaStorePath(oldPath);
+            refreshMediaIndex(oldPath, desired, "delay=" + delay);
+            if (removedFile || removedRows > 0) {
+                hooks.info("adaptive same-name overwrite residual cleaned: path="
+                        + oldPath.getAbsolutePath() + " file=" + removedFile
+                        + " mediaRows=" + removedRows + " delay=" + delay);
+            }
+        } catch (Throwable t) {
+            hooks.warn("adaptive same-name overwrite residual cleanup failed: "
+                    + t.getClass().getSimpleName() + " delay=" + delay);
+        }
+    }
+
+    private void refreshMediaIndex(File oldPath, File desired, String phase) {
+        try {
+            int removedRows = removeMediaStorePath(oldPath);
+            String oldValue = oldPath == null ? null : oldPath.getAbsolutePath();
+            String newValue = desired == null ? null : desired.getAbsolutePath();
+            ArrayList<String> paths = new ArrayList<>(2);
+            if (oldValue != null) paths.add(oldValue);
+            if (newValue != null) paths.add(newValue);
+            if (!paths.isEmpty()) {
+                MediaScannerConnection.scanFile(runtime.application,
+                        paths.toArray(new String[0]), null, null);
+            }
+            if (removedRows > 0) {
+                hooks.info("adaptive same-name overwrite media index cleaned: old=" + oldValue
+                        + " rows=" + removedRows + " phase=" + phase);
+            }
+        } catch (Throwable t) {
+            hooks.warn("adaptive same-name overwrite media refresh failed: "
+                    + t.getClass().getSimpleName() + " phase=" + phase);
+        }
+    }
+
+    private int removeMediaStorePath(File oldPath) {
+        if (oldPath == null || oldPath.exists() || runtime.application == null) return 0;
+        try {
+            ContentResolver resolver = runtime.application.getContentResolver();
+            return resolver.delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    MediaStore.MediaColumns.DATA + "=?",
+                    new String[]{oldPath.getAbsolutePath()});
+        } catch (Throwable ignored) {
+            return 0;
+        }
     }
 
     private boolean confirmDuplicate(Object bridge, long callbackId) {
