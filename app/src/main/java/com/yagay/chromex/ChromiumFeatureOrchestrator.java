@@ -26,6 +26,7 @@ final class ChromiumFeatureOrchestrator {
     void install() {
         installDownloadSourceBindings();
         installSameNameOverwrite();
+        installCompletionNameNormalizer();
         installDownloadHistory();
         installTabs();
         installDownloads();
@@ -52,6 +53,16 @@ final class ChromiumFeatureOrchestrator {
         install("same-name overwrite", () ->
                 new NativeFirstSameNameOverwriteHooks(
                         profile, runtime, hooks, prefs, renameBinding).install());
+    }
+
+    private void installCompletionNameNormalizer() {
+        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
+                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_COMPLETION, 60)) {
+            skip("completion filename normalization", "info/completion capability incomplete");
+            return;
+        }
+        install("completion filename normalization", () ->
+                new CompletionNameNormalizerHooks(profile, runtime, hooks, prefs).install());
     }
 
     private void installDownloadHistory() {
