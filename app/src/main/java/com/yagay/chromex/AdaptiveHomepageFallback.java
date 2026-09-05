@@ -7,20 +7,28 @@ import java.lang.reflect.Modifier;
 /**
  * Read-only homepage fallback for Chromium forks whose public homepage getter returns an empty GURL.
  *
- * <p>Some vendors keep their custom homepage in Chromium's SharedPreferencesManager rather than in
- * the stock homepage PrefService. This helper deliberately discovers that manager by stable type and
- * reads a short allow-list of homepage-shaped keys. It never writes browser preferences.</p>
+ * <p>Chromium stores the user homepage in PrefService (the stable pref key is {@code homepage}).
+ * Some forks additionally mirror policy/vendor values through SharedPreferencesManager. This helper
+ * discovers both stores by stable type/signature and never writes browser preferences.</p>
  */
 final class AdaptiveHomepageFallback {
+    private static final String PREF_SERVICE = "org.chromium.components.prefs.PrefService";
     private static final String SHARED_PREFS =
             "org.chromium.base.shared_preferences.SharedPreferencesManager";
-    private static final String[] KEYS = {
+    private static final String[] PREF_SERVICE_KEYS = {
+            "homepage",
+            "homepage_url",
+            "homepage_custom_uri"
+    };
+    private static final String[] SHARED_PREF_KEYS = {
             "homepage_custom_uri",
             "homepage_url",
             "homepage_uri",
             "lemur_home_page",
             "home_page",
-            "homepage"
+            "homepage",
+            "Chrome.Policy.HomepageLocation",
+            "Chrome.Policy.HomepageLocationGurl"
     };
 
     private AdaptiveHomepageFallback() {}
@@ -35,15 +43,62 @@ final class AdaptiveHomepageFallback {
                                       ChromeRuntime runtime, HookSupport hooks) {
         if (usableGurl(direct)) return direct;
         if (getter == null || runtime == null) return direct;
+
+        Object manager = AdaptiveDexResolver.singletonOwner(getter.getDeclaringClass());
+        if (manager == null) {
+            if (hooks != null) hooks.warn("adaptive homepage fallback: owner unavailable");
+            return direct;
+        }
+
+        Object fromPrefService = fromPrefService(manager, runtime, hooks);
+        if (usableGurl(fromPrefService)) return fromPrefService;
+
+        Object fromSharedPrefs = fromSharedPreferences(manager, runtime, hooks);
+        return usableGurl(fromSharedPrefs) ? fromSharedPrefs : direct;
+    }
+
+    private static Object fromPrefService(Object manager, ChromeRuntime runtime, HookSupport hooks) {
         try {
-            Object manager = AdaptiveDexResolver.singletonOwner(getter.getDeclaringClass());
-            if (manager == null) return direct;
+            Class<?> prefsType = Reflect.cls(runtime.classLoader, PREF_SERVICE);
+            Object prefs = Reflect.findFieldValueByType(manager, prefsType);
+            if (prefs == null) return null;
+
+            Method readString = uniqueStringReader(prefsType);
+            if (readString == null) {
+                if (hooks != null) hooks.warn("adaptive homepage fallback: PrefService string reader ambiguous");
+                return null;
+            }
+            try { readString.setAccessible(true); } catch (Throwable ignored) {}
+
+            for (String key : PREF_SERVICE_KEYS) {
+                Object raw = readString.invoke(prefs, key);
+                if (!(raw instanceof String)) continue;
+                String url = ((String) raw).trim();
+                if (!looksLikeHomepage(url)) continue;
+                Object gurl = buildGurl(runtime.classLoader, url);
+                if (!usableGurl(gurl)) continue;
+                if (hooks != null) {
+                    hooks.info("adaptive homepage fallback resolved from PrefService key=" + key
+                            + " reader=" + readString.getName());
+                }
+                return gurl;
+            }
+        } catch (Throwable t) {
+            if (hooks != null) hooks.warn("adaptive homepage PrefService fallback unavailable: "
+                    + t.getClass().getSimpleName());
+        }
+        return null;
+    }
+
+    private static Object fromSharedPreferences(Object manager, ChromeRuntime runtime,
+                                                HookSupport hooks) {
+        try {
             Class<?> prefsType = Reflect.cls(runtime.classLoader, SHARED_PREFS);
             Object shared = Reflect.findFieldValueByType(manager, prefsType);
-            if (shared == null) return direct;
+            if (shared == null) return null;
 
             Method readString = Reflect.exact(prefsType, "readString", String.class, String.class);
-            for (String key : KEYS) {
+            for (String key : SHARED_PREF_KEYS) {
                 Object value = readString.invoke(shared, key, "");
                 if (!(value instanceof String)) continue;
                 String url = ((String) value).trim();
@@ -57,10 +112,29 @@ final class AdaptiveHomepageFallback {
                 return gurl;
             }
         } catch (Throwable t) {
-            if (hooks != null) hooks.warn("adaptive homepage fallback unavailable: "
+            if (hooks != null) hooks.warn("adaptive homepage SharedPreferences fallback unavailable: "
                     + t.getClass().getSimpleName());
         }
-        return direct;
+        return null;
+    }
+
+    /** Returns the only instance String(String) accessor, independent of R8 method names. */
+    private static Method uniqueStringReader(Class<?> type) {
+        Method found = null;
+        Class<?> current = type;
+        while (current != null && current != Object.class) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (Modifier.isStatic(method.getModifiers()) || method.getReturnType() != String.class) {
+                    continue;
+                }
+                Class<?>[] p = method.getParameterTypes();
+                if (p.length != 1 || p[0] != String.class) continue;
+                if (found != null) return null;
+                found = method;
+            }
+            current = current.getSuperclass();
+        }
+        return found;
     }
 
     private static Object invokeGetter(Method getter, boolean forZeroTabs) {
