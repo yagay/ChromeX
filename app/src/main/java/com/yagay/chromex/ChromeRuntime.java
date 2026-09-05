@@ -5,12 +5,15 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 
+import java.io.File;
+
 /** Immutable runtime state after Chrome's isolated `chrome` split is actually ready. */
 final class ChromeRuntime {
     final Application application;
     final ApplicationInfo applicationInfo;
     final ClassLoader classLoader;
     final String versionName;
+    final long versionCode;
     final int majorVersion;
     final String chromeSplitPath;
 
@@ -20,7 +23,9 @@ final class ChromeRuntime {
         this.applicationInfo = applicationInfo;
         this.classLoader = classLoader;
         this.chromeSplitPath = chromeSplitPath;
-        this.versionName = resolveVersion(application);
+        PackageInfo info = resolvePackageInfo(application);
+        this.versionName = info == null || info.versionName == null ? "unknown" : info.versionName;
+        this.versionCode = info == null ? -1L : info.getLongVersionCode();
         this.majorVersion = parseMajor(versionName);
     }
 
@@ -32,12 +37,24 @@ final class ChromeRuntime {
         return majorVersion == 152;
     }
 
-    private static String resolveVersion(Context context) {
+    String resolverCacheKey() {
+        long length = -1L;
+        long modified = -1L;
         try {
-            PackageInfo info = context.getPackageManager().getPackageInfo(Chrome145.PACKAGE, 0);
-            return info.versionName == null ? "unknown" : info.versionName;
+            if (chromeSplitPath != null) {
+                File file = new File(chromeSplitPath);
+                length = file.length();
+                modified = file.lastModified();
+            }
+        } catch (Throwable ignored) {}
+        return versionCode + ":" + versionName + ":" + length + ":" + modified;
+    }
+
+    private static PackageInfo resolvePackageInfo(Context context) {
+        try {
+            return context.getPackageManager().getPackageInfo(Chrome145.PACKAGE, 0);
         } catch (Throwable ignored) {
-            return "unknown";
+            return null;
         }
     }
 
