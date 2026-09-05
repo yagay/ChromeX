@@ -3,7 +3,7 @@ package com.yagay.chromex;
 import java.io.File;
 import java.util.List;
 
-/** FULL backend for Chromium forks that already ship a native extension runtime. */
+/** Native backend for Chromium forks that expose vendor-specific Android extension bridges. */
 public final class NativeExtensionBackend implements ExtensionBackend {
     private final ExtensionCapabilityReport report;
     private final NativeExtensionBridgeResolver.Binding binding;
@@ -15,12 +15,12 @@ public final class NativeExtensionBackend implements ExtensionBackend {
 
     @Override
     public ExtensionRuntimeMode mode() {
-        return ExtensionRuntimeMode.FULL;
+        return ExtensionRuntimeMode.VENDOR_FULL;
     }
 
     @Override
     public boolean isAvailable() {
-        return report != null && report.mode == ExtensionRuntimeMode.FULL
+        return report != null && report.mode == ExtensionRuntimeMode.VENDOR_FULL
                 && binding != null && binding.hasAnyCallableBridge();
     }
 
@@ -46,7 +46,7 @@ public final class NativeExtensionBackend implements ExtensionBackend {
 
     @Override
     public String diagnostics() {
-        return "FULL backend selected\navailable=" + isAvailable() + "\n"
+        return "VENDOR_FULL backend selected\navailable=" + isAvailable() + "\n"
                 + (binding == null ? "bridge=null\n" : binding.diagnosticsText())
                 + (report == null ? "no capability report" : report.toDiagnosticText());
     }
