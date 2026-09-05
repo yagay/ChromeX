@@ -125,7 +125,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView help = new TextView(this);
         help.setText("诊断数据通过独立 IPC 从 Chrome 写回 ChromeX，本身失败不会影响功能 Hook。\n"
-                + "自动扫描稳定类、方法签名和新版 R8 候选，并记录 Hook 安装和实际命中。\n"
+                + "自动扫描主浏览器进程的类、方法签名和新版 R8 候选，并记录 Hook 安装和实际命中。\n"
                 + "最后扫描: " + lastScanText());
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(8));
@@ -157,15 +157,16 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         scan.setOnClickListener(v -> {
             if (prefs != null) prefs.edit().putBoolean(Config.DIAGNOSTIC_MODE, true).apply();
             scan.setEnabled(false);
-            Toast.makeText(this, "正在重新启动 Chrome 并触发自动定位…", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "正在清理旧诊断并重新启动 Chrome…", Toast.LENGTH_SHORT).show();
             new Thread(() -> {
+                DiagnosticProvider.clearStore(this);
                 boolean restarted = DiagnosticExporter.restartChrome(this);
                 runOnUiThread(() -> {
                     scan.setEnabled(true);
                     Toast.makeText(this,
                             restarted
                                     ? "Chrome 已重新启动。请触发失效功能，约 3 秒后即可导出。"
-                                    : "ChromeX 没有可用 Root。请手动强制结束 Chrome 后重新打开。",
+                                    : "ChromeX 没有可用 Root。旧诊断已清理，请手动强制结束 Chrome 后重新打开。",
                             Toast.LENGTH_LONG).show();
                 });
             }, "ChromeX-rescan").start();
@@ -190,7 +191,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView path = new TextView(this);
         path.setText("导出位置：Download/ChromeX/ChromeX-diagnostic-时间.zip\n"
-                + "ZIP 包含 hook_points、hook_install、hook_hits、模块事件、设备/Chrome 版本、"
+                + "ZIP 包含主进程 hook_points、hook_install、hook_hits、模块事件、设备/Chrome 版本、"
                 + "Root 状态、过滤后的 logcat 和 LSPosed 日志。\n"
                 + "即使没有 Root，核心 Hook/扫描诊断数据也应能正常导出。");
         path.setTextSize(13f);
