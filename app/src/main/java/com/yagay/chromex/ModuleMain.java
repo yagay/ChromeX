@@ -80,12 +80,13 @@ public final class ModuleMain extends XposedModule {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
 
-        scheduleExtensionCapabilityProbe(runtime.classLoader);
+        scheduleExtensionCapabilityProbe(runtime, profile);
         hooks.info("Chromium capability runtime ready: package=" + targetPackage
                 + " engine=" + profile.engineVersion);
     }
 
-    private void scheduleExtensionCapabilityProbe(ClassLoader classLoader) {
+    private void scheduleExtensionCapabilityProbe(ChromeRuntime runtime, ChromiumProfile profile) {
+        ClassLoader classLoader = runtime.classLoader;
         Thread worker = new Thread(() -> {
             try {
                 ExtensionCapabilityReport report = ExtensionCapabilityDetector.detect(classLoader);
@@ -93,8 +94,13 @@ public final class ModuleMain extends XposedModule {
                 ExtensionRuntimeRegistry.set(report, backend);
 
                 boolean liteRuntimeHooked = false;
+                boolean storePageHooked = false;
                 if (backend.mode() == ExtensionRuntimeMode.LITE && backend.isAvailable()) {
                     liteRuntimeHooked = LiteExtensionRuntime.install(classLoader, hooks);
+                    storePageHooked = LiteExtensionStorePageRuntime.install(runtime, hooks);
+                }
+                if (backend.mode() != ExtensionRuntimeMode.NONE) {
+                    new ExtensionCrxDownloadHooks(profile, runtime, hooks).install();
                 }
 
                 StringBuilder extra = new StringBuilder();
@@ -103,7 +109,8 @@ public final class ModuleMain extends XposedModule {
                             .append(backend.getInstalledExtensionIds().size()).append('\n');
                 }
                 if (backend.mode() == ExtensionRuntimeMode.LITE) {
-                    extra.append("liteRuntimeHooked=").append(liteRuntimeHooked).append('\n');
+                    extra.append("liteRuntimeHooked=").append(liteRuntimeHooked).append('\n')
+                            .append("storePageHooked=").append(storePageHooked).append('\n');
                 }
 
                 RuntimeDiagnostics.event("INFO", "Extension capability probe\n"
