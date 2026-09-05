@@ -30,4 +30,19 @@ public class DownloadNormalizationRegistryTest {
         File unrelated = new File(dir, "other.apk");
         assertNull(DownloadNormalizationRegistry.resolve(unrelated.getCanonicalPath()));
     }
+
+    @Test
+    public void listenersAreAdditive() throws Exception {
+        File dir = new File(System.getProperty("java.io.tmpdir"), "chromex-registry-listeners");
+        File oldFile = new File(dir, "archive (4).zip");
+        File newFile = new File(dir, "archive.zip");
+        int[] calls = new int[2];
+
+        DownloadNormalizationRegistry.setListener((oldPath, newPath) -> calls[0]++);
+        DownloadNormalizationRegistry.setListener((oldPath, newPath) -> calls[1]++);
+        DownloadNormalizationRegistry.register(oldFile, newFile);
+
+        assertEquals(1, calls[0]);
+        assertEquals(1, calls[1]);
+    }
 }
