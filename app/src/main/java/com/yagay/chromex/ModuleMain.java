@@ -89,13 +89,14 @@ public final class ModuleMain extends XposedModule {
         Thread worker = new Thread(() -> {
             try {
                 ExtensionCapabilityReport report = ExtensionCapabilityDetector.detect(classLoader);
-                ExtensionBackend backend = ExtensionBackendSelector.select(report);
+                ExtensionBackend backend = ExtensionBackendSelector.select(report, classLoader);
                 RuntimeDiagnostics.event("INFO", "Extension capability probe\n"
                         + report.toDiagnosticText()
                         + "backend=" + backend.getClass().getSimpleName() + "\n"
                         + backend.diagnostics());
                 hooks.info("Extension runtime mode=" + report.mode
                         + " backend=" + backend.getClass().getSimpleName()
+                        + " available=" + backend.isAvailable()
                         + " java=" + report.javaHits.size()
                         + " native=" + report.nativeHits.size());
             } catch (Throwable t) {
