@@ -23,46 +23,47 @@ public final class ModuleMain extends XposedModule {
         if (!Chrome145.PACKAGE.equals(param.getPackageName())) return;
         if (!param.isFirstPackage()) return;
 
-        ClassLoader loader = param.getClassLoader();
-        try {
-            prefs = Config.fromModule(this); // read-only in the hooked Chrome process
-        } catch (Throwable t) {
-            prefs = null;
-            log(Log.ERROR, "ChromeX", "remote preferences unavailable; using defaults", t);
+        // These hooks target Chrome's browser/UI/download Java layer. Installing and scanning the
+        // same targets in privileged/sandbox subprocesses produces false ClassNotFound reports and
+        // lets a later subprocess overwrite the useful browser-process diagnostics.
+        if (!Chrome145.PACKAGE.equals(processName)) {
+            log(Log.INFO, "ChromeX", "skip secondary Chrome process: " + processName);
+            return;
         }
-        hooks = new HookSupport(this, prefs);
 
-        // Diagnostics must never be able to prevent the functional hooks from installing.
+        ClassLoader loader = param.getClassLoader();
+        prefs = Config.fromModule(this);
         try {
             Diagnostics.beginSession(prefs, processName, getApiVersion(),
                     getFrameworkName(), getFrameworkVersion());
         } catch (Throwable t) {
-            log(Log.ERROR, "ChromeX", "diagnostic session initialization failed", t);
+            log(Log.WARN, "ChromeX", "diagnostic session init failed", t);
         }
+        hooks = new HookSupport(this, prefs);
 
-        installFeature("tabs", () -> new TabHooks(this, hooks, prefs, loader).install());
-        installFeature("download-dialogs",
-                () -> new DownloadDialogHooks(this, hooks, prefs, loader).install());
-        installFeature("installer", () -> new InstallerHooks(this, hooks, prefs, loader).install());
-        installFeature("banners", () -> new BannerHooks(this, hooks, prefs, loader).install());
+        installFeature("current compatibility", () ->
+                new CurrentChromeHooks(this, hooks, prefs, loader).install());
+        installFeature("tab hooks", () -> new TabHooks(this, hooks, prefs, loader).install());
+        installFeature("download dialog hooks", () ->
+                new DownloadDialogHooks(this, hooks, prefs, loader).install());
+        installFeature("installer hooks", () ->
+                new InstallerHooks(this, hooks, prefs, loader).install());
+        installFeature("banner hooks", () ->
+                new BannerHooks(this, hooks, prefs, loader).install());
 
         try {
             Diagnostics.scheduleScan(prefs, loader);
         } catch (Throwable t) {
-            log(Log.ERROR, "ChromeX", "automatic hook locator scheduling failed", t);
+            log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
-        hooks.info("adaptive Chrome hooks installed; diagnostic IPC is fail-safe");
+        hooks.info("adaptive Chrome hooks installed in main process; diagnostic IPC is fail-safe");
     }
 
     private void installFeature(String name, Runnable installer) {
         try {
             installer.run();
         } catch (Throwable t) {
-            log(Log.ERROR, "ChromeX", "feature install failed: " + name, t);
-            try {
-                Diagnostics.event(prefs, "ERROR", "feature install failed: " + name + " :: "
-                        + t.getClass().getSimpleName() + ": " + t.getMessage());
-            } catch (Throwable ignored) {}
+            log(Log.ERROR, "ChromeX", name + " failed during installation", t);
         }
     }
 
