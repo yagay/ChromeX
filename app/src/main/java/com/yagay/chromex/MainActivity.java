@@ -9,6 +9,7 @@ import android.os.Bundle;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -18,8 +19,10 @@ import android.widget.Toast;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import io.github.libxposed.service.XposedService;
 
@@ -27,6 +30,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
     private LinearLayout content;
     private TextView status;
     private SharedPreferences prefs;
+    private XposedService service;
     private int basePadding;
 
     private static final String[][] ITEMS = {
@@ -71,8 +75,6 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         scroll.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // targetSdk 37 uses edge-to-edge behavior. Apply real system-bar insets instead of relying
-        // on a fixed top/bottom padding, which avoids overlap on Android 16/17 and OEM variants.
         scroll.setOnApplyWindowInsetsListener((view, insets) -> {
             Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
             content.setPadding(basePadding + bars.left, basePadding + bars.top,
@@ -87,7 +89,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(title);
 
         TextView desc = new TextView(this);
-        desc.setText("Chrome 自适应兼容 · Split-ready · DexKit resolver · libxposed API 102\n"
+        desc.setText("Chrome / Chromium 自适应兼容 · Split-ready · DexKit resolver · libxposed API 102\n"
                 + "ChromeX: " + BuildConfig.VERSION_NAME
                 + " · run " + BuildConfig.BUILD_RUN
                 + " · " + BuildConfig.BUILD_SHA + "\n"
@@ -114,22 +116,27 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
     }
 
     @Override
-    public void onServiceChanged(XposedService service) {
-        runOnUiThread(() -> bind(service));
+    public void onServiceChanged(XposedService value) {
+        runOnUiThread(() -> bind(value));
     }
 
-    private void bind(XposedService service) {
+    private void bind(XposedService value) {
+        service = value;
         while (content.getChildCount() > 3) content.removeViewAt(3);
-        if (service == null) {
+        if (value == null) {
             prefs = null;
             status.setText("LSPosed 服务未连接。仍可导出本地诊断数据，但模块设置不可修改。\n");
             addDiagnosticsSection();
             return;
         }
-        prefs = Config.fromService(service);
-        status.setText("已连接 · API " + service.getApiVersion()
-                + " · 作用域 " + service.getScope() + "\n");
+        prefs = Config.fromService(value);
+        List<String> scope;
+        try { scope = value.getScope(); }
+        catch (Throwable t) { scope = new ArrayList<>(); }
+        status.setText("已连接 · API " + value.getApiVersion()
+                + " · 当前作用域 " + scope + "\n");
         for (String[] item : ITEMS) addSwitch(item[0], item[1]);
+        addBrowserScopeSection(scope);
         addAutoOpenSection();
         addDiagnosticsSection();
     }
@@ -149,6 +156,131 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         return sw;
     }
 
+    private void addBrowserScopeSection(List<String> currentScope) {
+        TextView heading = new TextView(this);
+        heading.setText("推荐浏览器 / 动态作用域");
+        heading.setTextSize(20f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setPadding(0, dp(20), 0, dp(4));
+        content.addView(heading);
+
+        TextView help = new TextView(this);
+        help.setText("自动扫描本机能处理 HTTPS 的 Chrome / Chromium 系浏览器。"
+                + "官方 Chrome 通道为固定推荐；Brave、Edge、Vivaldi、Cromite、Kiwi 等作为兼容候选。\n"
+                + "加入作用域后，ChromeX 会先验证 Chromium 核心类；不兼容的浏览器不会继续安装 Hook。"
+                + "LSPosed 仍可能弹出作用域确认窗口。");
+        help.setTextSize(14f);
+        help.setPadding(0, 0, 0, dp(6));
+        content.addView(help);
+
+        Set<String> scope = new HashSet<>(currentScope == null ? new ArrayList<>() : currentScope);
+        List<ChromiumTargets.Target> targets = ChromiumTargets.discover(this);
+        List<CheckBox> selectable = new ArrayList<>();
+        List<ChromiumTargets.Target> selectableTargets = new ArrayList<>();
+
+        if (targets.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("未发现可推荐的 Chromium 系浏览器。");
+            empty.setPadding(0, dp(6), 0, dp(6));
+            content.addView(empty);
+        } else {
+            for (ChromiumTargets.Target target : targets) {
+                boolean active = scope.contains(target.packageName);
+                CheckBox box = new CheckBox(this);
+                box.setText(target.displayLabel() + (active ? " · 已在作用域" : ""));
+                box.setTextSize(15f);
+                box.setPadding(0, dp(5), 0, dp(5));
+                box.setChecked(false);
+                box.setEnabled(!active);
+                content.addView(box, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                if (!active) {
+                    selectable.add(box);
+                    selectableTargets.add(target);
+                }
+            }
+        }
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(4), 0, dp(4));
+
+        Button selectAll = new Button(this);
+        selectAll.setText("全选未加入");
+        selectAll.setOnClickListener(v -> {
+            for (CheckBox box : selectable) box.setChecked(true);
+        });
+        actions.addView(selectAll, weightedButtonParams());
+
+        Button refresh = new Button(this);
+        refresh.setText("刷新");
+        refresh.setOnClickListener(v -> bind(service));
+        actions.addView(refresh, weightedButtonParams());
+        content.addView(actions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button add = new Button(this);
+        add.setText("将所选浏览器加入 LSPosed 作用域");
+        add.setEnabled(service != null && !selectable.isEmpty());
+        add.setOnClickListener(v -> {
+            List<String> packages = new ArrayList<>();
+            for (int i = 0; i < selectable.size(); i++) {
+                if (selectable.get(i).isChecked()) {
+                    packages.add(selectableTargets.get(i).packageName);
+                }
+            }
+            if (packages.isEmpty()) {
+                Toast.makeText(this, "请先勾选要加入的浏览器", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            requestBrowserScope(packages, add);
+        });
+        content.addView(add, buttonParams());
+    }
+
+    private void requestBrowserScope(List<String> packages, Button button) {
+        XposedService current = service;
+        if (current == null || packages == null || packages.isEmpty()) return;
+        Config.addDynamicTargets(prefs, packages);
+        button.setEnabled(false);
+        try {
+            current.requestScope(packages, new XposedService.OnScopeEventListener() {
+                @Override
+                public void onScopeRequestApproved(List<String> approved) {
+                    List<String> safeApproved = approved == null ? new ArrayList<>() : approved;
+                    Set<String> rejected = new HashSet<>(packages);
+                    rejected.removeAll(safeApproved);
+                    Config.addDynamicTargets(prefs, safeApproved);
+                    Config.removeDynamicTargets(prefs, rejected);
+                    runOnUiThread(() -> {
+                        Toast.makeText(MainActivity.this,
+                                safeApproved.isEmpty()
+                                        ? "没有新增作用域"
+                                        : "已加入作用域: " + safeApproved,
+                                Toast.LENGTH_LONG).show();
+                        bind(service);
+                    });
+                }
+
+                @Override
+                public void onScopeRequestFailed(String message) {
+                    Config.removeDynamicTargets(prefs, packages);
+                    runOnUiThread(() -> {
+                        button.setEnabled(true);
+                        Toast.makeText(MainActivity.this,
+                                "加入作用域失败: " + (message == null ? "未知错误" : message),
+                                Toast.LENGTH_LONG).show();
+                    });
+                }
+            });
+        } catch (Throwable t) {
+            Config.removeDynamicTargets(prefs, packages);
+            button.setEnabled(true);
+            Toast.makeText(this, "无法请求 LSPosed 作用域: " + t.getClass().getSimpleName(),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void addAutoOpenSection() {
         TextView heading = new TextView(this);
         heading.setText("下载完成后自动打开");
@@ -159,7 +291,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView help = new TextView(this);
         help.setText("可多选。仅勾选的文件类型会在下载真正完成后自动打开；"
-                + "使用 MIME + 扩展名双重识别。没有对应应用时只提示，不会导致 Chrome 崩溃。\n"
+                + "使用 MIME + 扩展名双重识别。没有对应应用时只提示，不会导致浏览器崩溃。\n"
                 + "APK 继续交给系统安装器；APKS/APKM/XAPK 会交给支持该格式的应用。");
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(6));
@@ -254,7 +386,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
                     Toast.makeText(this,
                             restarted
                                     ? "Chrome 已重新启动。请触发失效功能；深度扫描完成后会自动关闭。"
-                                    : "ChromeX 没有可用 Root。旧诊断已清理，请手动强制结束 Chrome 后重新打开。",
+                                    : "ChromeX 没有可用 Root。旧诊断已清理，请手动强制结束目标浏览器后重新打开。",
                             Toast.LENGTH_LONG).show();
                 });
             }, "ChromeX-rescan").start();
@@ -265,7 +397,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         export.setText("一键导出诊断包");
         export.setOnClickListener(v -> {
             export.setEnabled(false);
-            Toast.makeText(this, "正在收集 ChromeX / Chrome / LSPosed 相关日志…",
+            Toast.makeText(this, "正在收集 ChromeX / Chromium / LSPosed 相关日志…",
                     Toast.LENGTH_SHORT).show();
             new Thread(() -> {
                 DiagnosticExporter.Result result = DiagnosticExporter.export(this, prefs);
@@ -279,9 +411,9 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView path = new TextView(this);
         path.setText("导出位置：Download/ChromeX/ChromeX-diagnostic-时间.zip\n"
-                + "诊断包包含 split-ready、resolver、Hook 安装/命中、模块事件、设备/Chrome 版本、"
+                + "诊断包包含 split-ready、resolver、Hook 安装/命中、模块事件、设备/浏览器版本、"
                 + "Root 状态、过滤后的 logcat 和 LSPosed 日志。\n"
-                + "Resolver 缓存按 Chrome build 自动失效；Chrome 升级后无需手动清缓存。");
+                + "Resolver 缓存按浏览器 package/build 自动失效；浏览器升级后无需手动清缓存。");
         path.setTextSize(13f);
         path.setPadding(0, dp(8), 0, dp(16));
         content.addView(path);
