@@ -40,7 +40,7 @@ final class InstallerUriResolver {
     private InstallerUriResolver() {}
 
     static Result resolve(Context context, ClassLoader loader, String raw, String fileName) {
-        if (context == null) return Result.retry("Chrome context unavailable");
+        if (context == null) return Result.retry("browser context unavailable");
         if (raw != null && raw.startsWith("content://")) {
             Uri uri = Uri.parse(raw);
             return isContent(uri) ? Result.ok(uri, "existing content URI")
@@ -49,25 +49,25 @@ final class InstallerUriResolver {
 
         File file = existingFile(raw);
         if (file == null && fileName != null && !fileName.isBlank()) {
-            file = existingFile(new File(context.getExternalFilesDir(null),
-                    "Download/" + fileName).getAbsolutePath());
+            File external = context.getExternalFilesDir(null);
+            if (external != null) {
+                file = existingFile(new File(external, "Download/" + fileName).getAbsolutePath());
+            }
         }
 
         if (file != null) {
             Uri uri = fromAndroidXFileProvider(context, loader, file);
-            if (isContent(uri)) return Result.ok(uri, "Chrome FileProvider");
+            if (isContent(uri)) return Result.ok(uri, "browser FileProvider");
 
             uri = fromDownloadFileProvider(loader, file);
-            if (isContent(uri)) return Result.ok(uri, "Chrome DownloadFileProvider");
+            if (isContent(uri)) return Result.ok(uri, "Chromium DownloadFileProvider");
 
             uri = fromDownloadUtils(loader, file.getAbsolutePath());
-            if (isContent(uri)) return Result.ok(uri, "Chrome DownloadUtils");
+            if (isContent(uri)) return Result.ok(uri, "Chromium DownloadUtils");
 
             uri = mediaStoreUri(context, file.getAbsolutePath(), file.getName());
             if (isContent(uri)) return Result.ok(uri, "MediaStore");
 
-            // The file already exists. Retrying cannot turn a permanently unshareable file:// URI
-            // into content://, so fail once instead of logging every 500 ms for a minute.
             return Result.fail("completed file exists but no grantable content URI was resolved");
         }
 
@@ -91,6 +91,13 @@ final class InstallerUriResolver {
     }
 
     private static Uri fromAndroidXFileProvider(Context context, ClassLoader loader, File file) {
+        String packageName = context.getPackageName();
+        String[] authorities = {
+                packageName + ".FileProvider",
+                packageName + ".fileprovider",
+                packageName + ".download_file_provider",
+                packageName + ".DownloadFileProvider"
+        };
         for (String className : new String[]{
                 "androidx.core.content.FileProvider",
                 "android.support.v4.content.FileProvider"}) {
@@ -98,9 +105,12 @@ final class InstallerUriResolver {
                 Class<?> provider = Reflect.cls(loader, className);
                 Method method = Reflect.exact(provider, "getUriForFile",
                         Context.class, String.class, File.class);
-                Object value = method.invoke(null, context,
-                        Chrome145.PACKAGE + ".FileProvider", file);
-                if (value instanceof Uri && isContent((Uri) value)) return (Uri) value;
+                for (String authority : authorities) {
+                    try {
+                        Object value = method.invoke(null, context, authority, file);
+                        if (value instanceof Uri && isContent((Uri) value)) return (Uri) value;
+                    } catch (Throwable ignored) {}
+                }
             } catch (Throwable ignored) {}
         }
         return null;
