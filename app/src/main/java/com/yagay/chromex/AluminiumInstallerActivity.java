@@ -252,7 +252,7 @@ public final class AluminiumInstallerActivity extends Activity {
             while ((n = in.read(b)) >= 0) bos.write(b, 0, n);
         }
         int rc = p.waitFor();
-        String out = bos.toString(java.nio.charset.StandardCharsets.UTF_8);
+        String out = new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
         if (rc != 0) throw new IllegalStateException("Root command failed(" + rc + "): " + out.trim());
         return out;
     }
