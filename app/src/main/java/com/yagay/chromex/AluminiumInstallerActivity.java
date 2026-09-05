@@ -55,7 +55,7 @@ public final class AluminiumInstallerActivity extends Activity {
         box.addView(title);
 
         help = new TextView(this);
-        help.setText("正在读取 ChromeX 仓库稳定通道…");
+        help.setText("支持官方 Chromium Desktop Android 扩展插件功能。\n正在读取 ChromeX 仓库稳定通道…");
         help.setTextSize(15f);
         help.setPadding(0, p / 2, 0, p / 2);
         box.addView(help);
@@ -88,7 +88,8 @@ public final class AluminiumInstallerActivity extends Activity {
                 AluminiumReleaseCatalog.Release r = AluminiumReleaseCatalog.fetchStable();
                 target = r;
                 main.post(() -> {
-                    help.setText("从 ChromeX GitHub Release 下载 Google 原版 Aluminium Chrome 与匹配 Trichrome。\n"
+                    help.setText("支持官方 Chromium Desktop Android 扩展插件功能。\n"
+                            + "从 ChromeX GitHub Release 下载 Google 原版 Aluminium Chrome 与匹配 Trichrome。\n"
                             + "安装前校验文件大小、SHA-256、包名、版本号与 Google 证书；只使用 Root PackageManager 的降级能力，"
                             + "不会全局关闭 Android 签名校验。\n\n仓库稳定版：" + r.versionName
                             + " (" + r.versionCode + ")\nBuild：" + r.build + "\nRelease：" + r.tag);
