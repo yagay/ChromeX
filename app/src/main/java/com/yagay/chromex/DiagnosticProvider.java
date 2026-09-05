@@ -51,7 +51,6 @@ public final class DiagnosticProvider extends ContentProvider {
         synchronized (LOCK) {
             SharedPreferences prefs = store(context);
             SharedPreferences.Editor editor = prefs.edit();
-            // Keep resolver cache across diagnostic rescans; only diagnostic keys are reset.
             editor.remove(Diagnostics.KEY_SESSION)
                     .remove(Diagnostics.KEY_SCAN_REPORT)
                     .remove(Diagnostics.KEY_HOOK_REPORT)
@@ -99,6 +98,13 @@ public final class DiagnosticProvider extends ContentProvider {
                             .putString(Diagnostics.KEY_SCAN_REPORT, text)
                             .putLong(Diagnostics.KEY_LAST_SCAN, time)
                             .apply();
+                    // "重新定位 Hook 点" is a one-shot operation. RemotePreferences inside Chrome
+                    // are read-only, so the ChromeX-owned provider flips the real setting back off
+                    // once the scan result has been received.
+                    try {
+                        context.getSharedPreferences(Config.FILE, Context.MODE_PRIVATE)
+                                .edit().putBoolean(Config.DIAGNOSTIC_MODE, false).apply();
+                    } catch (Throwable ignored) {}
                     break;
                 default:
                     return null;
