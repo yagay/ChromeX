@@ -43,7 +43,9 @@ public final class Config {
     }
 
     public static boolean defaultValue(String key) {
-        if (ALL_DOWNLOAD_TOAST.equals(key)) return false;
+        // Deep diagnostic scans are intentionally opt-in because Chrome contains thousands of DEX
+        // classes. The "重新定位 Hook 点" button enables this before restarting Chrome.
+        if (DIAGNOSTIC_MODE.equals(key) || ALL_DOWNLOAD_TOAST.equals(key)) return false;
         return true;
     }
 }
