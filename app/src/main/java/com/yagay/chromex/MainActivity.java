@@ -6,10 +6,12 @@ import android.content.pm.PackageInfo;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.text.InputType;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -158,59 +160,56 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
     private void addBrowserScopeSection(List<String> currentScope) {
         TextView heading = new TextView(this);
-        heading.setText("推荐浏览器 / 动态作用域");
+        heading.setText("浏览器作用域");
         heading.setTextSize(20f);
         heading.setTypeface(Typeface.DEFAULT_BOLD);
         heading.setPadding(0, dp(20), 0, dp(4));
         content.addView(heading);
 
         TextView help = new TextView(this);
-        help.setText("自动扫描本机能处理 HTTPS 的 Chrome / Chromium 系浏览器。"
-                + "官方 Chrome 通道为固定推荐；Brave、Edge、Vivaldi、Cromite、Kiwi 等作为兼容候选。\n"
-                + "加入作用域后，ChromeX 会先验证 Chromium 核心类；不兼容的浏览器不会继续安装 Hook。"
-                + "LSPosed 仍可能弹出作用域确认窗口。");
+        help.setText("推荐浏览器会自动识别 Chrome / Chromium / Brave / Edge / Vivaldi / Cromite / Kiwi 等。\n"
+                + "其他能处理 HTTPS 的浏览器也会列出，可手动加入；加入后 ChromeX 仍会先验证 Chromium 核心类，"
+                + "不兼容时不会安装 Hook。也可在下方直接输入已安装应用的包名。"
+                + "LSPosed 可能弹出作用域确认窗口。");
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(6));
         content.addView(help);
 
         Set<String> scope = new HashSet<>(currentScope == null ? new ArrayList<>() : currentScope);
         List<ChromiumTargets.Target> targets = ChromiumTargets.discover(this);
+        List<ChromiumTargets.Target> recommended = new ArrayList<>();
+        List<ChromiumTargets.Target> others = new ArrayList<>();
+        for (ChromiumTargets.Target target : targets) {
+            if (target.recommended) recommended.add(target);
+            else others.add(target);
+        }
+
         List<CheckBox> selectable = new ArrayList<>();
         List<ChromiumTargets.Target> selectableTargets = new ArrayList<>();
+        List<CheckBox> recommendedSelectable = new ArrayList<>();
 
         if (targets.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("未发现可推荐的 Chromium 系浏览器。");
+            empty.setText("未发现可处理 HTTPS 的浏览器。仍可使用下方包名手动加入。");
             empty.setPadding(0, dp(6), 0, dp(6));
             content.addView(empty);
         } else {
-            for (ChromiumTargets.Target target : targets) {
-                boolean active = scope.contains(target.packageName);
-                CheckBox box = new CheckBox(this);
-                box.setText(target.displayLabel() + (active ? " · 已在作用域" : ""));
-                box.setTextSize(15f);
-                box.setPadding(0, dp(5), 0, dp(5));
-                box.setChecked(false);
-                box.setEnabled(!active);
-                content.addView(box, new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-                if (!active) {
-                    selectable.add(box);
-                    selectableTargets.add(target);
-                }
-            }
+            addBrowserTargetGroup("推荐浏览器", recommended, scope,
+                    selectable, selectableTargets, recommendedSelectable);
+            addBrowserTargetGroup("其他浏览器", others, scope,
+                    selectable, selectableTargets, null);
         }
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setPadding(0, dp(4), 0, dp(4));
 
-        Button selectAll = new Button(this);
-        selectAll.setText("全选未加入");
-        selectAll.setOnClickListener(v -> {
-            for (CheckBox box : selectable) box.setChecked(true);
+        Button selectRecommended = new Button(this);
+        selectRecommended.setText("全选推荐");
+        selectRecommended.setOnClickListener(v -> {
+            for (CheckBox box : recommendedSelectable) box.setChecked(true);
         });
-        actions.addView(selectAll, weightedButtonParams());
+        actions.addView(selectRecommended, weightedButtonParams());
 
         Button refresh = new Button(this);
         refresh.setText("刷新");
@@ -236,6 +235,75 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
             requestBrowserScope(packages, add);
         });
         content.addView(add, buttonParams());
+
+        TextView manualTitle = new TextView(this);
+        manualTitle.setText("手动输入包名");
+        manualTitle.setTextSize(16f);
+        manualTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        manualTitle.setPadding(0, dp(14), 0, dp(2));
+        content.addView(manualTitle);
+
+        EditText manualPackage = new EditText(this);
+        manualPackage.setHint("例如 com.example.browser");
+        manualPackage.setSingleLine(true);
+        manualPackage.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        content.addView(manualPackage, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button manualAdd = new Button(this);
+        manualAdd.setText("将该包名加入 LSPosed 作用域");
+        manualAdd.setOnClickListener(v -> {
+            String packageName = manualPackage.getText() == null
+                    ? "" : manualPackage.getText().toString().trim();
+            if (!ChromiumTargets.isValidPackageName(packageName)) {
+                Toast.makeText(this, "包名格式无效", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (scope.contains(packageName)) {
+                Toast.makeText(this, "该应用已经在当前作用域", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            ChromiumTargets.Target target = ChromiumTargets.installedTarget(this, packageName);
+            if (target == null) {
+                Toast.makeText(this, "未找到该已安装应用，或当前系统不允许读取它",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(this, "将尝试加入: " + target.label,
+                    Toast.LENGTH_SHORT).show();
+            requestBrowserScope(java.util.Collections.singletonList(packageName), manualAdd);
+        });
+        content.addView(manualAdd, buttonParams());
+    }
+
+    private void addBrowserTargetGroup(String title, List<ChromiumTargets.Target> targets,
+                                       Set<String> scope, List<CheckBox> selectable,
+                                       List<ChromiumTargets.Target> selectableTargets,
+                                       List<CheckBox> groupSelectable) {
+        if (targets == null || targets.isEmpty()) return;
+        TextView label = new TextView(this);
+        label.setText(title);
+        label.setTextSize(16f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setPadding(0, dp(8), 0, dp(2));
+        content.addView(label);
+
+        for (ChromiumTargets.Target target : targets) {
+            boolean active = scope.contains(target.packageName);
+            CheckBox box = new CheckBox(this);
+            box.setText(target.displayLabel() + (active ? " · 已在作用域" : ""));
+            box.setTextSize(15f);
+            box.setPadding(0, dp(5), 0, dp(5));
+            box.setChecked(false);
+            box.setEnabled(!active);
+            content.addView(box, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            if (!active) {
+                selectable.add(box);
+                selectableTargets.add(target);
+                if (groupSelectable != null) groupSelectable.add(box);
+            }
+        }
     }
 
     private void requestBrowserScope(List<String> packages, Button button) {
