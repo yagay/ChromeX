@@ -3,6 +3,8 @@ package com.yagay.chromex;
 import android.app.Application;
 import android.content.Intent;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.CopyOnWriteArraySet;
 
 import io.github.libxposed.service.XposedService;
@@ -32,20 +34,15 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
     @Override
     public void onCreate() {
         super.onCreate();
-        try {
-            int write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-            int readWritePrefix = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | write | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
-            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.URI, write);
-            // Cache reads use content://.../cache/<build-key>, so grant the cache URI as a prefix.
-            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.CACHE_URI, readWritePrefix);
-        } catch (Throwable ignored) {}
+        grantDiagnosticAccess(Collections.singletonList(Chrome145.PACKAGE));
         XposedServiceHelper.registerListener(this);
     }
 
     @Override
     public void onServiceBind(XposedService value) {
         service = value;
+        try { grantDiagnosticAccess(value.getScope()); }
+        catch (Throwable ignored) {}
         for (Listener listener : LISTENERS) listener.onServiceChanged(value);
     }
 
@@ -53,5 +50,19 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
     public void onServiceDied(XposedService value) {
         if (service == value) service = null;
         for (Listener listener : LISTENERS) listener.onServiceChanged(service);
+    }
+
+    private void grantDiagnosticAccess(Collection<String> packages) {
+        if (packages == null) return;
+        int write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+        int readWritePrefix = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | write | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
+        for (String packageName : packages) {
+            if (packageName == null || packageName.isBlank()) continue;
+            try {
+                grantUriPermission(packageName, DiagnosticProvider.URI, write);
+                grantUriPermission(packageName, DiagnosticProvider.CACHE_URI, readWritePrefix);
+            } catch (Throwable ignored) {}
+        }
     }
 }
