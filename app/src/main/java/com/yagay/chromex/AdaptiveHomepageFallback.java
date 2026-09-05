@@ -28,8 +28,12 @@ final class AdaptiveHomepageFallback {
     static Object resolve(Method getter, ChromeRuntime runtime, HookSupport hooks,
                           boolean forZeroTabs) {
         Object direct = invokeGetter(getter, forZeroTabs);
-        if (usableGurl(direct)) return direct;
+        return fallbackAfterDirect(direct, getter, runtime, hooks);
+    }
 
+    static Object fallbackAfterDirect(Object direct, Method getter,
+                                      ChromeRuntime runtime, HookSupport hooks) {
+        if (usableGurl(direct)) return direct;
         if (getter == null || runtime == null) return direct;
         try {
             Object manager = AdaptiveDexResolver.singletonOwner(getter.getDeclaringClass());
@@ -84,7 +88,7 @@ final class AdaptiveHomepageFallback {
         }
     }
 
-    private static boolean usableGurl(Object gurl) {
+    static boolean usableGurl(Object gurl) {
         String value = gurlText(gurl);
         return looksLikeHomepage(value);
     }
