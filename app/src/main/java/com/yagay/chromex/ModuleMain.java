@@ -66,6 +66,8 @@ public final class ModuleMain extends XposedModule {
                     new Chrome152Hooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 152 runtime corrections", () ->
                     new Chrome152Corrections(this, hooks, prefs, loader).install());
+            installFeature("Chrome 152 recently-closed cleanup", () ->
+                    new Chrome152RecentHistoryHooks(loader, hooks, prefs).install());
         } else if (VERIFIED_CHROME145.equals(runtime.versionName)) {
             // Legacy short R8 names are strictly confined to the exact release they were verified on.
             installFeature("Chrome 145 tab hooks", () ->
