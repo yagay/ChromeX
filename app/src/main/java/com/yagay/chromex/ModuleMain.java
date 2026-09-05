@@ -62,13 +62,19 @@ public final class ModuleMain extends XposedModule {
                 + " appVersion=" + runtime.versionName
                 + " engine=" + profile.engineVersion);
 
-        installFeature("same-name download overwrite", () ->
-                new SameNameOverwriteHooks(runtime, hooks, prefs).install());
+        installFeature("same-name download overwrite", () -> {
+            if (profile.isAdaptive()) {
+                new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
+            } else {
+                new SameNameOverwriteHooks(runtime, hooks, prefs).install();
+            }
+        });
         installFeature("download history rewrite", () ->
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install());
         installFeature("Chromium tabs/homepage", () -> {
             if (profile.isAdaptive()) {
                 new AdaptiveChromiumTabsHooks(profile, runtime, hooks, prefs).install();
+                new AdaptiveForkTabCompat(profile, runtime, hooks, prefs).install();
             } else {
                 new ChromiumTabsHooks(profile, runtime, hooks, prefs).install();
             }
