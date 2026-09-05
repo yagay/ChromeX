@@ -1,5 +1,7 @@
 package com.yagay.chromex;
 
+import java.lang.reflect.Method;
+
 /**
  * R8/native symbols verified from Chrome 152.0.7977.75 split_chrome.apk.
  * Never use these symbols outside the Chrome 152 profile.
@@ -25,4 +27,23 @@ final class Chrome152 {
     static final String DOWNLOAD_INFO_PATH = "g";
 
     private Chrome152() {}
+
+    static boolean matches(ClassLoader loader) {
+        if (ChromeVersion.is152()) return true;
+        if (!"unknown".equals(ChromeVersion.name())) return false;
+        try {
+            Class<?> command = Reflect.cls(loader, "org.chromium.base.CommandLine");
+            Method c = Reflect.exact(command, "c", String.class);
+            if (c.getReturnType() != boolean.class) return false;
+            Reflect.cls(loader, HOMEPAGE);
+            Reflect.cls(loader, TAB_CREATOR);
+            Reflect.cls(loader, TAB_SELECTOR);
+            Reflect.cls(loader, DOWNLOAD_MESSAGE);
+            Reflect.cls(loader, Chrome145.DOWNLOAD_INFO);
+            Reflect.cls(loader, Chrome145.DOWNLOAD_CONTROLLER);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
 }
