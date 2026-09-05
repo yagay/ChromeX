@@ -39,8 +39,7 @@ public final class ModuleMain extends XposedModule {
         }
         hooks = new HookSupport(this, prefs);
 
-        int major = ChromeVersion.major();
-        if (major == 152) {
+        if (Chrome152.matches(loader)) {
             // All short R8 symbols/native selectors in Chrome152Hooks were verified directly from
             // Chrome 152.0.7977.75. Do not mix legacy 145 fallbacks into this process: some short
             // class names are reused by unrelated classes in 152 and could otherwise be mis-hooked.
