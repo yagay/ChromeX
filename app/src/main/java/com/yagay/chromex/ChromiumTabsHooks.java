@@ -6,28 +6,35 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-/** Shared tab/homepage feature for verified Chromium profiles. */
+/** Shared tab/homepage feature for verified and adaptive Chromium profiles. */
 final class ChromiumTabsHooks {
     private final ChromiumProfile profile;
+    private final ChromeRuntime runtime;
     private final ClassLoader loader;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Set<Activity> handled = Collections.newSetFromMap(new WeakHashMap<>());
     private final ChromiumHistoryFallback history;
+    private final Method adaptiveHomepageGetter;
 
-    ChromiumTabsHooks(ChromiumProfile profile, ClassLoader loader,
+    ChromiumTabsHooks(ChromiumProfile profile, ChromeRuntime runtime,
                       HookSupport hooks, SharedPreferences prefs) {
         this.profile = profile;
-        this.loader = loader;
+        this.runtime = runtime;
+        this.loader = runtime.classLoader;
         this.hooks = hooks;
         this.prefs = prefs;
         this.history = new ChromiumHistoryFallback(profile, loader, hooks);
+        this.adaptiveHomepageGetter = profile.isAdaptive()
+                ? DexKitResolver.resolveHomepageGetter(runtime, hooks) : null;
     }
 
     void install() {
@@ -37,6 +44,33 @@ final class ChromiumTabsHooks {
     }
 
     private void installNoRestore() {
+        if (profile.isAdaptive()) {
+            try {
+                Class<?> command = Reflect.cls(loader, "org.chromium.base.CommandLine");
+                Method candidate = null;
+                for (Method method : command.getDeclaredMethods()) {
+                    if (method.getReturnType() != boolean.class) continue;
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params.length != 1 || params[0] != String.class) continue;
+                    if (candidate != null) {
+                        hooks.warn("adaptive no-restore ambiguous; preserving Chromium restore behavior");
+                        return;
+                    }
+                    try { method.setAccessible(true); } catch (Throwable ignored) {}
+                    candidate = method;
+                }
+                if (candidate == null) return;
+                hooks.method(candidate, "chromex:tabs:no-restore:adaptive", chain -> {
+                    if (Config.get(prefs, Config.CLEAN_START)
+                            && "no-restore-state".equals(chain.getArg(0))) return Boolean.TRUE;
+                    return chain.proceed();
+                });
+            } catch (Throwable t) {
+                hooks.warn("adaptive no-restore unavailable: " + t.getClass().getSimpleName());
+            }
+            return;
+        }
+
         String owner = profile.is145() ? Chrome145.COMMAND_FLAGS : "org.chromium.base.CommandLine";
         hooks.exact(loader, owner, "c", new Class<?>[]{String.class},
                 "chromex:tabs:no-restore:" + profile.family, chain -> {
@@ -90,7 +124,9 @@ final class ChromiumTabsHooks {
             if (incognito != null && incognito != regular) {
                 restoreSuppressed &= TabCloseStrategy.closeAll(loader, incognito, hooks, true);
             }
-            if (!restoreSuppressed) history.clear(activity, "exit-fallback-" + reason);
+            if (!restoreSuppressed && profile.isVerifiedExact()) {
+                history.clear(activity, "exit-fallback-" + reason);
+            }
             hooks.info(profile.label() + " exit tab cleanup via " + reason
                     + " restoreSuppressed=" + restoreSuppressed);
         } catch (Throwable t) {
@@ -112,7 +148,7 @@ final class ChromiumTabsHooks {
                             return chain.proceed();
                         });
             }
-        } else {
+        } else if (profile.is145()) {
             hooks.all(loader, Chrome145.TAB_CREATOR, "l", "chromex:tabs:creator145", chain -> {
                 if (Config.get(prefs, Config.NEWTAB_HOME) && !chain.getArgs().isEmpty()) {
                     redirectLoadUrlParam(chain.getArg(0), "a");
@@ -228,7 +264,8 @@ final class ChromiumTabsHooks {
             }
 
             if (count(regular) <= 1 || round + 1 >= profile.maxRounds) {
-                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS) && !restoreSuppressed) {
+                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS)
+                        && !restoreSuppressed && profile.isVerifiedExact()) {
                     history.clear(activity, "cold-start-fallback");
                 }
                 hooks.info(profile.label() + " cold start settled at round " + round
@@ -252,14 +289,8 @@ final class ChromiumTabsHooks {
             Class<?> stable = Reflect.cls(loader,
                     "org.chromium.chrome.browser.tabmodel.TabModelSelector");
             Object selector = Reflect.findFieldValueByType(activity, stable);
-            if (selector != null) {
-                for (String method : new String[]{"getModel", "getTabModel"}) {
-                    try {
-                        Object value = Reflect.call(selector, method, incognito);
-                        if (value != null) return value;
-                    } catch (Throwable ignored) {}
-                }
-            }
+            Object value = selectStableModel(selector, incognito);
+            if (value != null) return value;
         } catch (Throwable ignored) {}
 
         if (profile.is152()) {
@@ -275,13 +306,61 @@ final class ChromiumTabsHooks {
             }
         }
 
-        try {
-            Object selector = Reflect.findFieldValueByType(activity,
-                    Reflect.cls(loader, Chrome145.SELECTOR));
-            return selector == null ? null : Reflect.call(selector, "l", incognito);
-        } catch (Throwable ignored) {
-            return null;
+        if (profile.is145()) {
+            try {
+                Object selector = Reflect.findFieldValueByType(activity,
+                        Reflect.cls(loader, Chrome145.SELECTOR));
+                return selector == null ? null : Reflect.call(selector, "l", incognito);
+            } catch (Throwable ignored) {
+                return null;
+            }
         }
+
+        return structuralModel(activity, incognito);
+    }
+
+    private Object selectStableModel(Object selector, boolean incognito) {
+        if (selector == null) return null;
+        for (String method : new String[]{"getModel", "getTabModel"}) {
+            try {
+                Object value = Reflect.call(selector, method, incognito);
+                if (value != null) return value;
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private Object structuralModel(Activity activity, boolean incognito) {
+        try {
+            Class<?> tabModelApi = Reflect.cls(loader, Chrome145.TAB_MODEL_API);
+            Class<?> type = activity.getClass();
+            while (type != null && type != Object.class) {
+                for (Field field : type.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers())) continue;
+                    Object candidate;
+                    try {
+                        field.setAccessible(true);
+                        candidate = field.get(activity);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (candidate == null) continue;
+                    Method selector = Reflect.signature(candidate.getClass(), tabModelApi,
+                            boolean.class);
+                    if (selector == null) continue;
+                    try {
+                        Object value = selector.invoke(candidate, incognito);
+                        if (value != null) {
+                            hooks.info("adaptive TabModel selector resolved: "
+                                    + candidate.getClass().getName() + "#" + selector.getName());
+                            return value;
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                type = type.getSuperclass();
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     private Object homepageGurl(boolean forZeroTabs) {
@@ -303,10 +382,38 @@ final class ChromiumTabsHooks {
                 return instance == null ? null
                         : Reflect.call(instance, "b", Boolean.FALSE, forZeroTabs);
             }
-            Class<?> owner = Reflect.cls(loader, Chrome145.HOMEPAGE);
-            Object instance = Reflect.callStatic(owner, "d");
-            return instance == null ? null : Reflect.call(instance, "b", Boolean.FALSE);
+            if (profile.is145()) {
+                Class<?> owner = Reflect.cls(loader, Chrome145.HOMEPAGE);
+                Object instance = Reflect.callStatic(owner, "d");
+                return instance == null ? null : Reflect.call(instance, "b", Boolean.FALSE);
+            }
+            return adaptiveHomepageGurl(forZeroTabs);
         } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private Object adaptiveHomepageGurl(boolean forZeroTabs) {
+        Method getter = adaptiveHomepageGetter;
+        if (getter == null) return null;
+        try {
+            Object owner = null;
+            if (!Modifier.isStatic(getter.getModifiers())) {
+                Class<?> type = getter.getDeclaringClass();
+                Method factory = null;
+                for (Method method : type.getDeclaredMethods()) {
+                    if (!Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 0
+                            || method.getReturnType() != type) continue;
+                    if (factory != null) return null;
+                    try { method.setAccessible(true); } catch (Throwable ignored) {}
+                    factory = method;
+                }
+                if (factory == null) return null;
+                owner = factory.invoke(null);
+            }
+            return getter.invoke(owner, Boolean.FALSE, forZeroTabs);
+        } catch (Throwable t) {
+            hooks.warn("adaptive homepage invocation failed: " + t.getClass().getSimpleName());
             return null;
         }
     }
@@ -339,11 +446,11 @@ final class ChromiumTabsHooks {
                 Class<?> gurlType = Reflect.cls(loader, Chrome145.GURL);
                 Object gurl = home != null ? home : Reflect.construct(gurlType, wanted);
                 for (Method method : model.getClass().getMethods()) {
-                    Class<?>[] p = method.getParameterTypes();
-                    if (p.length != 2 || p[1] != int.class || method.getReturnType() == void.class) {
-                        continue;
-                    }
-                    if (!p[0].isAssignableFrom(gurlType) && !gurlType.isAssignableFrom(p[0])) continue;
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params.length != 2 || params[1] != int.class
+                            || method.getReturnType() == void.class) continue;
+                    if (!params[0].isAssignableFrom(gurlType)
+                            && !gurlType.isAssignableFrom(params[0])) continue;
                     try { method.setAccessible(true); } catch (Throwable ignored) {}
                     Object value = method.invoke(model, gurl, 2);
                     if (value != null) return value;
@@ -359,7 +466,7 @@ final class ChromiumTabsHooks {
             Object value = Reflect.call(model, "getCount");
             if (value instanceof Number) return ((Number) value).intValue();
         } catch (Throwable ignored) {}
-        if (profile.is145()) {
+        if (profile.is145() || profile.isAdaptive()) {
             try {
                 Method method = Reflect.signature(model.getClass(), int.class);
                 Object value = method == null ? null : method.invoke(model);
