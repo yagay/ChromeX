@@ -35,84 +35,95 @@ final class TabCloseStrategy {
         return close(loader, model, tabs, hooks, uponExit);
     }
 
+    /**
+     * @return true only when the modern path explicitly disabled saving to TabRestoreService.
+     *         false means callers may still need the legacy recently-closed cleanup fallback.
+     */
     private static boolean close(ClassLoader loader, Object model, List<Object> tabs,
                                  HookSupport hooks, boolean uponExit) {
         if (tabs == null || tabs.isEmpty()) return true;
         try {
             Object remover = Reflect.call(model, "getTabRemover");
-            if (remover == null) return fallback(model, tabs);
+            if (remover == null) {
+                fallback(model, tabs);
+                return false;
+            }
 
             Class<?> params = Reflect.cls(loader, TAB_CLOSURE_PARAMS);
-            Method factory = null;
-            for (Method method : params.getDeclaredMethods()) {
-                if (!Modifier.isStatic(method.getModifiers())
-                        || !"closeTabs".equals(method.getName())
-                        || method.getParameterCount() != 1
-                        || !List.class.isAssignableFrom(method.getParameterTypes()[0])) continue;
-                method.setAccessible(true);
-                factory = method;
-                break;
-            }
+            Method factory = closeTabsFactory(params);
             if (factory == null && tabs.size() == 1) {
                 Class<?> tabType = Reflect.cls(loader, "org.chromium.chrome.browser.tab.Tab");
                 try { factory = Reflect.exact(params, "closeTab", tabType); }
                 catch (Throwable ignored) {}
             }
-            if (factory == null) return fallback(model, tabs);
-
-            Object builder = factory.invoke(null, tabs.size() == 1
-                    && !List.class.isAssignableFrom(factory.getParameterTypes()[0])
-                    ? tabs.get(0) : tabs);
-            if (builder == null) return fallback(model, tabs);
-            builder = callBuilder(builder, "allowUndo", false);
-            builder = callBuilderIfPresent(builder, "saveToTabRestoreService", false);
-            builder = callBuilderIfPresent(builder, "uponExit", uponExit);
-            Object built = Reflect.call(builder, "build");
-            if (built == null) return fallback(model, tabs);
-
-            try {
-                Reflect.call(remover, "forceCloseTabs", built);
-            } catch (Throwable forceFailure) {
-                Reflect.call(remover, "closeTabs", built, Boolean.FALSE);
+            if (factory == null) {
+                fallback(model, tabs);
+                return false;
             }
+
+            boolean listFactory = List.class.isAssignableFrom(factory.getParameterTypes()[0]);
+            Object builder = factory.invoke(null, listFactory ? tabs : tabs.get(0));
+            if (builder == null) {
+                fallback(model, tabs);
+                return false;
+            }
+
+            builder = requiredBuilder(builder, "allowUndo", false);
+            boolean restoreSuppressed = false;
+            try {
+                Object next = Reflect.call(builder, "saveToTabRestoreService", false);
+                builder = next == null ? builder : next;
+                restoreSuppressed = true;
+            } catch (Throwable ignored) {}
+            try {
+                Object next = Reflect.call(builder, "uponExit", uponExit);
+                builder = next == null ? builder : next;
+            } catch (Throwable ignored) {}
+
+            Object built = Reflect.call(builder, "build");
+            if (built == null) {
+                fallback(model, tabs);
+                return false;
+            }
+
+            try { Reflect.call(remover, "forceCloseTabs", built); }
+            catch (Throwable forceFailure) { Reflect.call(remover, "closeTabs", built, Boolean.FALSE); }
+
             if (hooks != null) hooks.info("automatic tabs closed through TabClosureParams; count="
-                    + tabs.size() + " uponExit=" + uponExit);
-            return true;
+                    + tabs.size() + " restoreSuppressed=" + restoreSuppressed
+                    + " uponExit=" + uponExit);
+            return restoreSuppressed;
         } catch (Throwable t) {
             if (hooks != null) hooks.warn("TabClosureParams cleanup unavailable: "
                     + t.getClass().getSimpleName());
-            return fallback(model, tabs);
+            fallback(model, tabs);
+            return false;
         }
     }
 
-    private static Object callBuilder(Object builder, String name, boolean value) throws Exception {
+    private static Method closeTabsFactory(Class<?> params) {
+        for (Method method : params.getDeclaredMethods()) {
+            if (!Modifier.isStatic(method.getModifiers())
+                    || !"closeTabs".equals(method.getName())
+                    || method.getParameterCount() != 1
+                    || !List.class.isAssignableFrom(method.getParameterTypes()[0])) continue;
+            try { method.setAccessible(true); } catch (Throwable ignored) {}
+            return method;
+        }
+        return null;
+    }
+
+    private static Object requiredBuilder(Object builder, String name, boolean value) throws Exception {
         Object next = Reflect.call(builder, name, value);
         return next == null ? builder : next;
     }
 
-    private static Object callBuilderIfPresent(Object builder, String name, boolean value) {
-        try {
-            Object next = Reflect.call(builder, name, value);
-            return next == null ? builder : next;
-        } catch (Throwable ignored) {
-            return builder;
-        }
-    }
-
-    private static boolean fallback(Object model, List<Object> tabs) {
-        boolean success = true;
+    private static void fallback(Object model, List<Object> tabs) {
         for (int i = tabs.size() - 1; i >= 0; i--) {
             Object tab = tabs.get(i);
-            try {
-                Class<?> tabType = tab.getClass();
-                Method close = Reflect.exact(model.getClass(), "closeTab", tabType);
-                close.invoke(model, tab);
-            } catch (Throwable first) {
-                try { Reflect.call(model, "closeTab", tab); }
-                catch (Throwable ignored) { success = false; }
-            }
+            try { Reflect.call(model, "closeTab", tab); }
+            catch (Throwable ignored) {}
         }
-        return false && success;
     }
 
     private static int count(Object model) {
