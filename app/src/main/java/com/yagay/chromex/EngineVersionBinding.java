@@ -15,7 +15,7 @@ final class EngineVersionBinding {
             return value;
         }
 
-        value = hooks == null ? null : AdaptiveDexResolver.resolveProductVersion(runtime, hooks);
+        value = hooks == null ? null : EngineVersionDexResolver.resolve(runtime, hooks);
         if (ChromiumEngineVersionScanner.plausible(value)) return value;
 
         if (hooks != null) {
