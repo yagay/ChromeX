@@ -58,8 +58,8 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(title);
 
         TextView desc = new TextView(this);
-        desc.setText("Chrome 自适应兼容 · libxposed Modern API 102\n已安装 Chrome: "
-                + installedChromeVersion());
+        desc.setText("Chrome 自适应兼容 · Split-ready · DexKit resolver · libxposed API 102\n"
+                + "已安装 Chrome: " + installedChromeVersion());
         desc.setTextSize(14f);
         desc.setPadding(0, dp(4), 0, dp(12));
         content.addView(desc);
@@ -124,9 +124,10 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(heading);
 
         TextView help = new TextView(this);
-        help.setText("诊断数据通过独立 IPC 从 Chrome 写回 ChromeX，本身失败不会影响功能 Hook。\n"
-                + "自动扫描主浏览器进程的类、方法签名和新版 R8 候选，并记录 Hook 安装和实际命中。\n"
-                + "最后扫描: " + lastScanText());
+        help.setText("正常使用会等待 Chrome 的 chrome split ClassLoader 就绪后再安装 Hook；"
+                + "未知新版优先用稳定 API 与 DexKit 结构解析，不再误用旧版 R8 短类名。\n"
+                + "深度诊断默认关闭，仅在排查升级兼容性时开启；Resolver 缓存会跨诊断重扫保留。\n"
+                + "最后深度扫描: " + lastScanText());
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(8));
         content.addView(help);
@@ -142,7 +143,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         }, "ChromeX-root-probe").start();
 
         Switch diagnostic = new Switch(this);
-        diagnostic.setText("诊断模式（推荐保持开启）");
+        diagnostic.setText("深度诊断模式（仅调试/重新定位时开启）");
         diagnostic.setTextSize(16f);
         diagnostic.setChecked(Config.get(prefs, Config.DIAGNOSTIC_MODE));
         diagnostic.setPadding(0, dp(6), 0, dp(6));
@@ -191,9 +192,9 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView path = new TextView(this);
         path.setText("导出位置：Download/ChromeX/ChromeX-diagnostic-时间.zip\n"
-                + "ZIP 包含主进程 hook_points、hook_install、hook_hits、模块事件、设备/Chrome 版本、"
+                + "诊断包包含 split-ready、resolver、Hook 安装/命中、模块事件、设备/Chrome 版本、"
                 + "Root 状态、过滤后的 logcat 和 LSPosed 日志。\n"
-                + "即使没有 Root，核心 Hook/扫描诊断数据也应能正常导出。");
+                + "Resolver 缓存按 Chrome build 自动失效；Chrome 升级后无需手动清缓存。");
         path.setTextSize(13f);
         path.setPadding(0, dp(8), 0, dp(16));
         content.addView(path);
@@ -210,7 +211,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         try {
             SharedPreferences diagnosticPrefs = DiagnosticProvider.store(this);
             long value = diagnosticPrefs.getLong(Diagnostics.KEY_LAST_SCAN, 0L);
-            if (value <= 0L) return "暂无；请重新启动 Chrome";
+            if (value <= 0L) return "暂无";
             return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     .format(new Date(value));
         } catch (Throwable ignored) {
