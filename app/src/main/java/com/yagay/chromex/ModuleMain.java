@@ -30,53 +30,35 @@ public final class ModuleMain extends XposedModule {
 
         if (!Chrome145.PACKAGE.equals(processName)) {
             log(Log.INFO, "ChromeX", "skip secondary Chrome process: " + processName);
-            try {
-                detach();
-            } catch (Throwable ignored) {}
+            try { detach(); } catch (Throwable ignored) {}
             return;
         }
 
         prefs = Config.fromModule(this);
         hooks = new HookSupport(this, prefs);
-        try {
-            Diagnostics.beginSession(prefs, processName, getApiVersion(),
-                    getFrameworkName(), getFrameworkVersion());
-        } catch (Throwable t) {
-            log(Log.WARN, "ChromeX", "diagnostic session init failed", t);
-        }
+        RuntimeDiagnostics.beginSession(processName, getApiVersion(),
+                getFrameworkName(), getFrameworkVersion());
 
-        // Chrome's browser Java code lives in an isolated feature split. PackageReadyParam only
-        // describes the loader at that instant, so defer all browser hooks until the `chrome` split
-        // is confirmed loadable.
         installFeature("Chrome split bootstrap", () ->
                 new ChromeBootstrap(this, hooks, prefs, param.getClassLoader(),
                         param.getApplicationInfo(), this::installForRuntime).install());
     }
 
     private void installForRuntime(ChromeRuntime runtime) {
-        try {
-            Diagnostics.beginSession(prefs, processName, getApiVersion(),
-                    getFrameworkName(), getFrameworkVersion());
-        } catch (Throwable ignored) {}
-
+        RuntimeDiagnostics.flushPendingIfPossible();
         ClassLoader loader = runtime.classLoader;
 
-        // Install the stable duplicate bridge interception for every split-ready build. When the
-        // overwrite option is enabled Config suppresses the older duplicate-accept hooks, so this
-        // hook owns the conflict decision and prevents Chromium from uniquifying to " (1)".
         installFeature("same-name download overwrite", () ->
-                new OverwriteDownloadHooks(runtime, hooks, prefs).install());
+                new SameNameOverwriteHooks(runtime, hooks, prefs).install());
 
         if (Chrome152.matches(runtime)) {
             hooks.info("verified exact-build profile selected: " + runtime.versionName);
-            installFeature("Chrome 152 verified profile", () ->
-                    new Chrome152Hooks(this, hooks, prefs, loader).install());
-            installFeature("Chrome 152 runtime corrections", () ->
-                    new Chrome152Corrections(this, hooks, prefs, loader).install());
-            installFeature("Chrome 152 recently-closed cleanup", () ->
-                    new Chrome152RecentHistoryHooks(loader, hooks, prefs).install());
+            installFeature("Chrome 152 tabs/homepage", () ->
+                    new Chrome152TabsHooks(loader, hooks, prefs).install());
+            installFeature("Chrome 152 downloads", () ->
+                    new Chrome152DownloadHooks(loader, hooks, prefs).install());
+            hooks.info("Chrome 152 consolidated profile active: " + runtime.versionName);
         } else if (VERIFIED_CHROME145.equals(runtime.versionName)) {
-            // Legacy short R8 names are strictly confined to the exact release they were verified on.
             installFeature("Chrome 145 tab hooks", () ->
                     new TabHooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 145 download dialog hooks", () ->
@@ -87,15 +69,14 @@ public final class ModuleMain extends XposedModule {
                     new BannerHooks(this, hooks, prefs, loader).install());
             hooks.info("verified Chrome 145 profile active: " + runtime.versionName);
         } else {
-            // New or changed builds never touch release-specific R8 short names or numeric J.N
-            // selectors. This includes point updates within Chrome 145/152 when their exact build
-            // has not been verified.
             installFeature("adaptive Chrome hooks", () ->
                     new AdaptiveChromeHooks(this, hooks, prefs, runtime).install());
             installFeature("adaptive download dialogs", () ->
                     new AdaptiveDownloadDialogs(runtime, hooks, prefs).install());
         }
 
+        // Deep locator is opt-in. Lightweight hook/session/hit/error telemetry is handled by
+        // RuntimeDiagnostics and stays available even when deep scanning is disabled.
         try {
             Diagnostics.scheduleScan(prefs, loader);
         } catch (Throwable t) {
@@ -109,6 +90,8 @@ public final class ModuleMain extends XposedModule {
             installer.run();
         } catch (Throwable t) {
             log(Log.ERROR, "ChromeX", name + " failed during installation", t);
+            RuntimeDiagnostics.event("ERROR", name + " failed during installation :: "
+                    + t.getClass().getSimpleName() + ": " + t.getMessage());
         }
     }
 
@@ -120,9 +103,7 @@ public final class ModuleMain extends XposedModule {
     @Override
     public void onHotReloaded(HotReloadedParam param) {
         for (HookHandle handle : param.getOldHookHandles()) {
-            try {
-                handle.unhook();
-            } catch (Throwable ignored) {}
+            try { handle.unhook(); } catch (Throwable ignored) {}
         }
         log(Log.INFO, "ChromeX", "old hooks removed after hot reload; restart Chrome to reinstall");
     }
