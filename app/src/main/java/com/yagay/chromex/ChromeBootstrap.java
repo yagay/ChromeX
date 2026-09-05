@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedModule;
 
-/** Waits until Chrome's isolated browser split is actually attached. */
+/** Waits until the target Chromium browser's main split/classloader is actually ready. */
 final class ChromeBootstrap {
     interface ReadyCallback {
         void onReady(ChromeRuntime runtime);
@@ -23,6 +23,7 @@ final class ChromeBootstrap {
     private final XposedModule module;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
+    private final String targetPackage;
     private final ClassLoader initialLoader;
     private final ApplicationInfo applicationInfo;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -30,18 +31,19 @@ final class ChromeBootstrap {
     private final ReadyCallback callback;
 
     ChromeBootstrap(XposedModule module, HookSupport hooks, SharedPreferences prefs,
-                    ClassLoader initialLoader, ApplicationInfo applicationInfo,
+                    String targetPackage, ClassLoader initialLoader, ApplicationInfo applicationInfo,
                     ReadyCallback callback) {
         this.module = module;
         this.hooks = hooks;
         this.prefs = prefs;
+        this.targetPackage = targetPackage;
         this.initialLoader = initialLoader;
         this.applicationInfo = applicationInfo;
         this.callback = callback;
     }
 
     void install() {
-        hooks.info("bootstrap: waiting for Chrome isolated split");
+        hooks.info("bootstrap: waiting for Chromium target " + targetPackage);
         installApplicationCreateObserver();
         tryCurrentApplication("package-ready");
         for (long delay : RETRIES_MS) {
@@ -59,7 +61,7 @@ final class ChromeBootstrap {
                 Object arg = chain.getArg(0);
                 if (arg instanceof Application) {
                     Application app = (Application) arg;
-                    if (Chrome145.PACKAGE.equals(app.getPackageName())) {
+                    if (targetPackage.equals(app.getPackageName())) {
                         tryReady(app, "Instrumentation.callApplicationOnCreate");
                     }
                 }
@@ -76,7 +78,7 @@ final class ChromeBootstrap {
             Class<?> thread = Class.forName("android.app.ActivityThread");
             Object app = thread.getMethod("currentApplication").invoke(null);
             if (app instanceof Application
-                    && Chrome145.PACKAGE.equals(((Application) app).getPackageName())) {
+                    && targetPackage.equals(((Application) app).getPackageName())) {
                 tryReady((Application) app, reason);
             }
         } catch (Throwable ignored) {}
@@ -90,7 +92,8 @@ final class ChromeBootstrap {
 
         String splitPath = findChromeSplitPath(applicationInfo);
         ChromeRuntime runtime = new ChromeRuntime(app, applicationInfo, loader, splitPath);
-        hooks.info("bootstrap: chrome split ready via " + reason
+        hooks.info("bootstrap: Chromium split ready via " + reason
+                + ", package=" + targetPackage
                 + ", version=" + runtime.versionName
                 + ", loader=" + loader.getClass().getName()
                 + ", split=" + (splitPath == null ? "unknown" : splitPath));
@@ -106,7 +109,9 @@ final class ChromeBootstrap {
         String[] splitNames = applicationInfo == null ? null : applicationInfo.splitNames;
         if (splitNames != null) {
             for (String splitName : splitNames) {
-                if (splitName == null || !splitName.toLowerCase().contains("chrome")) continue;
+                if (splitName == null) continue;
+                String lower = splitName.toLowerCase();
+                if (!lower.contains("chrome") && !lower.contains("browser")) continue;
                 try {
                     Context split = app.createContextForSplit(splitName);
                     ClassLoader loader = split.getClassLoader();
@@ -115,11 +120,13 @@ final class ChromeBootstrap {
             }
         }
 
-        try {
-            Context split = app.createContextForSplit("chrome");
-            ClassLoader loader = split.getClassLoader();
-            if (loader != null && hasBrowserAnchor(loader)) return loader;
-        } catch (Throwable ignored) {}
+        for (String splitName : new String[]{"chrome", "browser"}) {
+            try {
+                Context split = app.createContextForSplit(splitName);
+                ClassLoader loader = split.getClassLoader();
+                if (loader != null && hasBrowserAnchor(loader)) return loader;
+            } catch (Throwable ignored) {}
+        }
 
         try {
             ClassLoader loader = app.getClassLoader();
@@ -130,10 +137,7 @@ final class ChromeBootstrap {
         return null;
     }
 
-    /**
-     * Bootstrap only verifies the browser split itself. Download/translate/etc. classes are feature
-     * dependencies and must be allowed to fail independently on future Chrome builds.
-     */
+    /** Verify the stable Chromium ChromeTabbedActivity anchor before any feature Hook is installed. */
     private boolean hasBrowserAnchor(ClassLoader loader) {
         try {
             Class.forName(Chrome145.ACTIVITY, false, loader);
@@ -149,13 +153,18 @@ final class ChromeBootstrap {
         if (names != null && names.length == info.splitSourceDirs.length) {
             for (int i = 0; i < names.length; i++) {
                 String name = names[i];
-                if (name != null && name.toLowerCase().contains("chrome")) {
-                    return info.splitSourceDirs[i];
+                if (name != null) {
+                    String lower = name.toLowerCase();
+                    if (lower.contains("chrome") || lower.contains("browser")) {
+                        return info.splitSourceDirs[i];
+                    }
                 }
             }
         }
         for (String path : info.splitSourceDirs) {
-            if (path != null && path.toLowerCase().contains("chrome")) return path;
+            if (path == null) continue;
+            String lower = path.toLowerCase();
+            if (lower.contains("chrome") || lower.contains("browser")) return path;
         }
         return null;
     }
