@@ -9,6 +9,7 @@ final class ChromiumFeatureOrchestrator {
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
+    private OfflineContentRenameBinding renameBinding;
 
     ChromiumFeatureOrchestrator(ChromiumProfile profile, BrowserCapabilities capabilities,
                                 ChromeRuntime runtime, HookSupport hooks,
@@ -21,12 +22,22 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
+        installDownloadSourceBindings();
         installSameNameOverwrite();
         installDownloadHistory();
         installTabs();
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
                 + " profile=" + profile.label());
+    }
+
+    private void installDownloadSourceBindings() {
+        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
+                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI, 60)) return;
+        install("OfflineContent source binding", () -> {
+            renameBinding = new OfflineContentRenameBinding(profile, runtime, hooks);
+            renameBinding.install();
+        });
     }
 
     private void installSameNameOverwrite() {
@@ -37,7 +48,8 @@ final class ChromiumFeatureOrchestrator {
             return;
         }
         install("same-name overwrite", () ->
-                new UniversalSameNameOverwriteHooks(profile, runtime, hooks, prefs).install());
+                new NativeFirstSameNameOverwriteHooks(
+                        profile, runtime, hooks, prefs, renameBinding).install());
     }
 
     private void installDownloadHistory() {
