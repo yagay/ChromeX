@@ -45,6 +45,8 @@ public final class ModuleMain extends XposedModule {
             // class names are reused by unrelated classes in 152 and could otherwise be mis-hooked.
             installFeature("Chrome 152 verified profile", () ->
                     new Chrome152Hooks(this, hooks, prefs, loader).install());
+            installFeature("Chrome 152 runtime corrections", () ->
+                    new Chrome152Corrections(this, hooks, prefs, loader).install());
         } else {
             installFeature("tab hooks", () -> new TabHooks(this, hooks, prefs, loader).install());
             installFeature("download dialog hooks", () ->
