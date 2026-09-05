@@ -57,6 +57,8 @@ final class ChromiumFeatureOrchestrator {
             skip("download history", "DownloadInfo unavailable");
             return;
         }
+        install("download backend refresh", () ->
+                new DownloadBackendRefreshBinding(runtime, hooks).install());
         install("download history", () ->
                 new UniversalDownloadHistoryHooks(profile, runtime, hooks, prefs).install());
     }
