@@ -36,8 +36,7 @@ final class TabCloseStrategy {
     }
 
     /**
-     * @return true only when the modern path explicitly disabled saving to TabRestoreService.
-     *         false means callers may still need the legacy recently-closed cleanup fallback.
+     * @return true only when Chromium explicitly disabled saving to TabRestoreService.
      */
     private static boolean close(ClassLoader loader, Object model, List<Object> tabs,
                                  HookSupport hooks, boolean uponExit) {
@@ -49,7 +48,11 @@ final class TabCloseStrategy {
                 return false;
             }
 
-            Class<?> params = Reflect.cls(loader, TAB_CLOSURE_PARAMS);
+            Class<?> params = resolveClosureParams(loader, remover);
+            if (params == null) {
+                fallback(loader, model, tabs);
+                return false;
+            }
             Method factory = closeTabsFactory(params);
             if (factory == null && tabs.size() == 1) {
                 Class<?> tabType = Reflect.cls(loader, "org.chromium.chrome.browser.tab.Tab");
@@ -87,11 +90,11 @@ final class TabCloseStrategy {
             }
 
             try { Reflect.call(remover, "forceCloseTabs", built); }
-            catch (Throwable forceFailure) { Reflect.call(remover, "closeTabs", built, Boolean.FALSE); }
+            catch (Throwable forceFailure) { Reflect.call(remover, "closeTabs", built, false); }
 
             if (hooks != null) hooks.info("automatic tabs closed through TabClosureParams; count="
                     + tabs.size() + " restoreSuppressed=" + restoreSuppressed
-                    + " uponExit=" + uponExit);
+                    + " uponExit=" + uponExit + " params=" + params.getName());
             return restoreSuppressed;
         } catch (Throwable t) {
             if (hooks != null) hooks.warn("TabClosureParams cleanup unavailable: "
@@ -99,6 +102,25 @@ final class TabCloseStrategy {
             fallback(loader, model, tabs);
             return false;
         }
+    }
+
+    /** Stable class first; if R8 renamed it, infer the params type from TabRemover's API. */
+    private static Class<?> resolveClosureParams(ClassLoader loader, Object remover) {
+        try { return Reflect.cls(loader, TAB_CLOSURE_PARAMS); }
+        catch (Throwable ignored) {}
+        if (remover == null) return null;
+        Class<?> type = remover.getClass();
+        while (type != null && type != Object.class) {
+            for (Method method : type.getDeclaredMethods()) {
+                String name = method.getName();
+                if (!"forceCloseTabs".equals(name) && !"closeTabs".equals(name)) continue;
+                Class<?>[] p = method.getParameterTypes();
+                if (p.length < 1 || p[0].isPrimitive()) continue;
+                return p[0];
+            }
+            type = type.getSuperclass();
+        }
+        return null;
     }
 
     private static Method closeTabsFactory(Class<?> params) {
@@ -123,15 +145,12 @@ final class TabCloseStrategy {
             Object tab = tabs.get(i);
             boolean closed = false;
             try {
-                Reflect.call(model, "closeTab", tab,
-                        Boolean.FALSE, Boolean.TRUE, Boolean.FALSE);
+                Reflect.call(model, "closeTab", tab, false, true, false);
                 closed = true;
             } catch (Throwable ignored) {}
             if (!closed) {
-                try {
-                    Reflect.call(model, "closeTab", tab);
-                    closed = true;
-                } catch (Throwable ignored) {}
+                try { Reflect.call(model, "closeTab", tab); closed = true; }
+                catch (Throwable ignored) {}
             }
             if (!closed) {
                 try {

@@ -9,7 +9,6 @@ import android.os.Looper;
 import android.widget.Toast;
 
 import java.io.File;
-import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -18,10 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * One download completion/action engine for verified Chrome and arbitrary Chromium forks.
- * Browser differences are limited to capability discovery and verified fallback callbacks.
- */
+/** Source-first download completion/action engine with legacy completion fallbacks. */
 final class UniversalDownloadHooks {
     private static final long COMPLETION_SETTLE_MS = 750L;
     private static final long COMPLETION_DEDUP_MS = 3000L;
@@ -36,6 +32,7 @@ final class UniversalDownloadHooks {
     private final ClassLoader loader;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
+    private final ResolvedBindings bindings;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<String, Long> completions = new ConcurrentHashMap<>();
     private final AtomicLong suppressBannerUntil = new AtomicLong();
@@ -48,17 +45,21 @@ final class UniversalDownloadHooks {
         thread.setDaemon(true);
         return thread;
     });
+    private OfflineContentLifecycleBinding lifecycleBinding;
 
     UniversalDownloadHooks(ChromiumProfile profile, ChromeRuntime runtime,
-                           HookSupport hooks, SharedPreferences prefs) {
+                           HookSupport hooks, SharedPreferences prefs,
+                           ResolvedBindings bindings) {
         this.profile = profile;
         this.runtime = runtime;
         this.loader = runtime.classLoader;
         this.hooks = hooks;
         this.prefs = prefs;
+        this.bindings = bindings;
     }
 
     void install() {
+        installOfflineLifecycle();
         hookCompletionOwner(Chrome145.DOWNLOAD_CONTROLLER,
                 "chromex:universal:download-controller-completed");
         hookCompletionOwner(Chrome145.DOWNLOAD_MANAGER_SERVICE,
@@ -69,16 +70,39 @@ final class UniversalDownloadHooks {
         if (profile.is145()) install145Fallbacks();
     }
 
+    private void installOfflineLifecycle() {
+        if (bindings == null || bindings.offlineItemUpdated == null) return;
+        lifecycleBinding = new OfflineContentLifecycleBinding(
+                runtime, hooks, bindings, this::handleOfflineCompletion);
+        if (!lifecycleBinding.install()) lifecycleBinding = null;
+    }
+
     private void hookCompletionOwner(String owner, String id) {
         if (!hasMethod(owner, "onDownloadCompleted")) return;
         hooks.all(loader, owner, "onDownloadCompleted", id, chain -> {
             Object info = DownloadInfoAccessor.find(chain.getArgs().toArray(), loader);
             Object result = chain.proceed();
-            if (info != null) {
-                main.postDelayed(() -> handleCompletion(info, owner), COMPLETION_SETTLE_MS);
-            }
+            if (info != null) main.postDelayed(() -> handleCompletion(info, owner), COMPLETION_SETTLE_MS);
             return result;
         });
+    }
+
+    private void handleOfflineCompletion(Object item, OfflineContentLifecycleBinding source) {
+        try {
+            OfflineItemAccessor.Values values = OfflineItemAccessor.read(item);
+            if (!values.usable()) return;
+            String path = values.path;
+            String name = values.name;
+            String logical = DownloadNormalizationRegistry.logicalPath(path);
+            if (logical != null) {
+                path = logical;
+                name = new File(logical).getName();
+            }
+            processArtifact(new Artifact(path, name, values.mime, values.contentKey),
+                    "OfflineContentAggregator", values.detail, source, item);
+        } catch (Throwable t) {
+            hooks.error("OfflineContent download completion", t);
+        }
     }
 
     private void handleCompletion(Object info, String source) {
@@ -96,30 +120,41 @@ final class UniversalDownloadHooks {
                 path = logical;
                 name = new File(logical).getName();
             }
-            Artifact artifact = new Artifact(path, name, values.mime);
-            if (!markCompletion(artifact.key())) return;
-
-            String nameOrPath = artifact.name != null ? artifact.name : artifact.path;
-            boolean apk = DownloadAutoOpenPolicy.isApk(artifact.mime, nameOrPath);
-            boolean replaceBanner = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
-                    || (apk && Config.get(prefs, Config.APK_TOAST));
-            if (replaceBanner) {
-                suppressBannerUntil.set(System.currentTimeMillis() + BANNER_WINDOW_MS);
-                suppressBudget.set(4);
-                showToastOnce(artifact.displayName());
-            }
-
-            DownloadAutoOpenPolicy.Match match = DownloadAutoOpenPolicy.match(
-                    prefs, artifact.mime, nameOrPath);
-            if (match != null) enqueueOpen(artifact.path, artifact.name, match);
-
-            hooks.info("download completion through universal pipeline: "
-                    + artifact.displayName() + " source=" + simpleName(source)
-                    + " metadata=" + values.detail
-                    + (match == null ? "" : " autoOpen=" + match.category));
+            processArtifact(new Artifact(path, name, values.mime, null),
+                    simpleName(source), values.detail, null, null);
         } catch (Throwable t) {
             hooks.error("universal download completion", t);
         }
+    }
+
+    private void processArtifact(Artifact artifact, String source, String metadata,
+                                 OfflineContentLifecycleBinding lifecycle, Object offlineItem) {
+        if (artifact == null || !markCompletion(artifact.key())) return;
+        String nameOrPath = artifact.name != null ? artifact.name : artifact.path;
+        boolean apk = DownloadAutoOpenPolicy.isApk(artifact.mime, nameOrPath);
+        boolean replaceBanner = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
+                || (apk && Config.get(prefs, Config.APK_TOAST));
+        if (replaceBanner) {
+            suppressBannerUntil.set(System.currentTimeMillis() + BANNER_WINDOW_MS);
+            suppressBudget.set(4);
+            showToastOnce(artifact.displayName());
+        }
+
+        DownloadAutoOpenPolicy.Match match = DownloadAutoOpenPolicy.match(
+                prefs, artifact.mime, nameOrPath);
+        boolean sourceOpened = false;
+        if (match != null && lifecycle != null && offlineItem != null && !apk) {
+            sourceOpened = lifecycle.open(offlineItem);
+        }
+        if (match != null && !sourceOpened) {
+            enqueueOpen(artifact.path, artifact.name, match);
+        }
+
+        hooks.info("download completion through universal pipeline: "
+                + artifact.displayName() + " source=" + source
+                + " metadata=" + metadata
+                + (match == null ? "" : " autoOpen=" + match.category
+                        + (sourceOpened ? ":offline-source" : ":uri-fallback")));
     }
 
     /** Keep manual open aligned with the same selected auto-open policy on every fork exposing it. */
@@ -154,13 +189,11 @@ final class UniversalDownloadHooks {
     private void installBannerSuppression() {
         String current = "org.chromium.chrome.browser.download.DownloadMessageUiControllerImpl";
         if (hasMethod(current, "onItemUpdated")) {
-            hooks.all(loader, current, "onItemUpdated",
-                    "chromex:universal:banner-current", chain -> {
-                        if (takeBannerSuppression(false)) return null;
-                        return chain.proceed();
-                    });
+            hooks.all(loader, current, "onItemUpdated", "chromex:universal:banner-current", chain -> {
+                if (takeBannerSuppression(false)) return null;
+                return chain.proceed();
+            });
         }
-
         if (profile.is152()) {
             for (String method : new String[]{"a", "d"}) {
                 if (!hasMethod(Chrome152.DOWNLOAD_MESSAGE, method)) continue;
@@ -203,7 +236,7 @@ final class UniversalDownloadHooks {
         }
     }
 
-    /** Exact Chrome 145 completion/banner fallbacks remain isolated from the universal pipeline. */
+    /** Exact Chrome 145 completion/banner fallbacks remain last-resort signals. */
     private void install145Fallbacks() {
         try {
             Class<?> item = Reflect.cls(loader, Chrome145.OFFLINE_ITEM);
@@ -259,19 +292,8 @@ final class UniversalDownloadHooks {
             path = logical;
             name = new File(logical).getName();
         }
-        Artifact artifact = new Artifact(path, name, mime);
-        if (!markCompletion(artifact.key())) return;
-        String nameOrPath = name != null ? name : path;
-        boolean apk = DownloadAutoOpenPolicy.isApk(mime, nameOrPath);
-        boolean replaceBanner = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
-                || (apk && Config.get(prefs, Config.APK_TOAST));
-        if (replaceBanner) {
-            suppressBannerUntil.set(System.currentTimeMillis() + BANNER_WINDOW_MS);
-            suppressBudget.set(4);
-            showToastOnce(artifact.displayName());
-        }
-        DownloadAutoOpenPolicy.Match match = DownloadAutoOpenPolicy.match(prefs, mime, nameOrPath);
-        if (match != null) enqueueOpen(path, name, match);
+        processArtifact(new Artifact(path, name, mime, null),
+                "Chrome145-fallback", "exact", null, null);
     }
 
     private boolean markCompletion(String key) {
@@ -307,12 +329,8 @@ final class UniversalDownloadHooks {
                             + " category=" + match.category + " :: " + resolved.detail);
                     return;
                 }
-                try {
-                    Thread.sleep(OPEN_POLL_MS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
+                try { Thread.sleep(OPEN_POLL_MS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
             }
             hooks.warn(profile.label() + " file not resolvable after 20s: " + fileName);
         });
@@ -352,9 +370,7 @@ final class UniversalDownloadHooks {
             try {
                 String safe = name == null || name.isBlank() ? "下载文件" : name;
                 Toast.makeText(runtime.application, message + ": " + safe, Toast.LENGTH_LONG).show();
-            } catch (Throwable t) {
-                hooks.error("show auto-open failure", t);
-            }
+            } catch (Throwable t) { hooks.error("show auto-open failure", t); }
         });
     }
 
@@ -365,29 +381,22 @@ final class UniversalDownloadHooks {
         lastToastName.set(safe);
         lastToastAt.set(now);
         main.post(() -> {
-            try {
-                Toast.makeText(runtime.application, "下载完成: " + safe, Toast.LENGTH_SHORT).show();
-            } catch (Throwable t) {
-                hooks.error("show download toast", t);
-            }
+            try { Toast.makeText(runtime.application, "下载完成: " + safe, Toast.LENGTH_SHORT).show(); }
+            catch (Throwable t) { hooks.error("show download toast", t); }
         });
     }
 
     private boolean hasMethod(String className, String methodName) {
-        try {
-            Class<?> type = Reflect.cls(loader, className);
-            return !Reflect.named(type, methodName).isEmpty();
-        } catch (Throwable ignored) {
-            return false;
-        }
+        try { return !Reflect.named(Reflect.cls(loader, className), methodName).isEmpty(); }
+        catch (Throwable ignored) { return false; }
     }
 
     private static String firstPath(Object[] args) {
         if (args == null) return null;
         for (Object arg : args) {
-            if (!(arg instanceof String)) continue;
-            String value = (String) arg;
-            if (AdaptiveDownloadInfo.looksLikePath(value)) return value;
+            if (arg instanceof String && AdaptiveDownloadInfo.looksLikePath((String) arg)) {
+                return (String) arg;
+            }
         }
         return null;
     }
@@ -420,9 +429,7 @@ final class UniversalDownloadHooks {
         try {
             String value = new File(clean).getName();
             return value == null || value.isBlank() ? null : value;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        } catch (Throwable ignored) { return null; }
     }
 
     private static String stringField(Object value, String field) {
@@ -430,9 +437,7 @@ final class UniversalDownloadHooks {
         try {
             Object raw = Reflect.get(value, field);
             return raw instanceof String ? (String) raw : null;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        } catch (Throwable ignored) { return null; }
     }
 
     private static String simpleName(String value) {
@@ -445,20 +450,24 @@ final class UniversalDownloadHooks {
         final String path;
         final String name;
         final String mime;
+        final String contentKey;
 
-        Artifact(String path, String name, String mime) {
+        Artifact(String path, String name, String mime, String contentKey) {
             this.path = path;
             this.name = name;
             this.mime = mime;
+            this.contentKey = contentKey;
         }
 
         String displayName() {
             if (name != null && !name.isBlank()) return name;
             if (path != null && !path.isBlank()) return path;
+            if (contentKey != null && !contentKey.isBlank()) return contentKey;
             return "下载文件";
         }
 
         String key() {
+            if (contentKey != null && !contentKey.isBlank()) return "content:" + contentKey;
             return String.valueOf(path) + '|' + String.valueOf(name) + '|' + String.valueOf(mime);
         }
     }
@@ -466,10 +475,6 @@ final class UniversalDownloadHooks {
     private static final class OpenStamp {
         final String key;
         final long time;
-
-        OpenStamp(String key, long time) {
-            this.key = key;
-            this.time = time;
-        }
+        OpenStamp(String key, long time) { this.key = key; this.time = time; }
     }
 }

@@ -1,95 +1,120 @@
 # ChromeX Chromium Compatibility Architecture
 
-ChromeX targets Chromium capabilities, not browser brands or R8 symbols.
+ChromeX targets Chromium decisions and data sources, not browser brands or R8 symbols.
 
 ## Resolution order
 
 Every binding must prefer the most stable evidence available:
 
-1. Stable Chromium API/type
+1. Stable Chromium API/type and source decision
 2. Generated semantic JNI
 3. Semantic DEX strings and call graph
 4. Structural signatures and object-conversion relationships
 5. Live runtime object graph
 6. Verified exact-build fallback
 
-Package names, vendor-specific short class names, and R8 field names must not be used as primary routing keys.
+Package names, vendor-specific short class names, and R8 field names must not be primary routing keys.
 
 ## Runtime pipeline
 
-`ModuleMain` only bootstraps the real Chromium classloader. `ChromiumCapabilityResolver` produces `BrowserCapabilities`, and `ChromiumFeatureOrchestrator` installs shared feature engines from those capabilities.
+`ModuleMain` only bootstraps the real Chromium classloader. `ChromiumCapabilityResolver` performs one resolution pass and returns `ResolvedBindings`. `BrowserCapabilities` is the human-readable capability report generated from the same pass. `ChromiumFeatureOrchestrator` then installs shared feature engines using those bindings.
 
-Verified Chrome 145/152 metadata remains only as a high-confidence fallback. Unknown Chromium forks use the same engines once their semantic bindings resolve.
+Expensive semantic/Dex resolution must not be repeated independently by feature classes. Verified Chrome 145/152 metadata remains only as a last high-confidence fallback.
+
+## Source-first rule
+
+For every feature, prefer the point where Chromium makes the decision or owns the authoritative state. UI/result rewriting is a fallback.
+
+Examples:
+
+- New tab: `TabCreatorUtil.launchNtp` source decision -> creator argument rewrite fallback.
+- Download completion: `OfflineContentAggregatorBridge.onItemUpdated` state transition -> legacy `onDownloadCompleted` fallback.
+- Download location: `DownloadDialogBridge.getPromptForDownloadAndroid` -> dialog callback fallback.
+- Cold start: `TabModelSelectorBase.markTabStateInitialized` -> lifecycle timing fallback.
+- Recently closed: `RecentlyClosedBridge.clearRecentlyClosedEntries` -> verified exact JNI fallback.
+- Engine version: `VersionInfo.getProductVersion` -> semantic DEX -> version-literal scan -> app version fallback.
 
 ## Downloads
 
-The canonical modern Chromium path is:
+Canonical modern Chromium path:
 
 `Download backend -> OfflineContentProvider -> OfflineContentAggregatorBridge -> OfflineItem -> Download UI`
 
-`DownloadInfoAccessor` reads download metadata by stable accessors first, verified exact fields second, and value/shape analysis last.
+`DownloadInfoAccessor` and `OfflineItemAccessor` read metadata by stable accessors/fields first and value/shape analysis when R8 renames implementation details.
 
-`DownloadOfflineItemBinding` resolves the `DownloadItem -> OfflineItem` materializer by signature, so R8-renamed method names do not matter.
+`OfflineContentLifecycleBinding` snapshots OfflineItem integer state and learns an obfuscated state field from a real transition into `OfflineItemState.COMPLETE`. Ambiguous transitions are ignored, allowing the legacy completion callback to remain the safe fallback.
+
+Auto-open prefers Chromium's `OfflineContentProvider.openItem(ContentId)` for normal documents/media. APK installation keeps the URI/FileProvider path because Android package installation has additional permission and content-URI requirements.
 
 ### Same-name overwrite
 
-`NativeFirstSameNameOverwriteHooks` is a three-tier engine. The preferred solution prevents Chromium from creating a uniquified filename at all.
+`NativeFirstSameNameOverwriteHooks` is a three-tier engine.
 
 #### Tier 1: reservation-source conflict policy
 
-Android Chromium confirms a duplicate and then asks `DownloadPathReservationTracker` for the requested path with the `UNIQUIFY` policy. `DownloadConflictPolicyBinding` virtualizes an overwrite policy without patching native code:
-
-1. Capture the duplicate target while the original file still exists.
-2. Snapshot the directory and atomically move the old original to a hidden same-directory transaction backup.
+1. Capture the duplicate target while the original still exists.
+2. Atomically move the old original to a hidden same-directory transaction backup.
 3. Confirm the duplicate through Chromium's normal callback.
-4. Chromium runs its own `GetReservedPath(... UNIQUIFY ...)`; because the original path is now free, it can reserve the original filename instead of `name (1).ext`.
-5. On successful completion, keep the Chromium-created original-name file and delete the old backup.
-6. On confirmation failure, unresolved completion or timeout, restore the old file when the target is still free.
-7. On browser-process restart, recover stale transaction backups before starting another overwrite.
+4. Chromium performs its normal `GetReservedPath(... UNIQUIFY ...)`; because the requested path is free, it can reserve the original name instead of `name (1).ext`.
+5. Successful completion deletes the old backup.
+6. Failure/timeout restores it when safe.
+7. Browser restart recovers stale transaction backups.
 
-This tier depends on semantic duplicate/completion/DownloadInfo capabilities rather than a browser package or Chromium version. The capability report exposes it as `DOWNLOAD_CONFLICT_POLICY`.
+This is exposed as `DOWNLOAD_CONFLICT_POLICY`.
 
 #### Tier 2: Chromium source-of-truth rename
 
-If a backend/fork still creates a numbered file, ChromeX captures the DownloadItem/OfflineItem ContentId and calls `OfflineContentAggregatorBridge` RenameItem with the original filename. Chromium then updates its real DownloadItem, OfflineItem and observers.
-
-Generated semantic JNI is preferred. Stock Chromium builds that compress JNI into `J.N` are resolved from the caller's DEX; `DexNativeSelectorResolver` reads the selector constant from that build instead of hard-coding it.
+If a backend still creates a numbered file, ChromeX captures the `ContentId` and calls `OfflineContentAggregatorBridge.renameItem` with the original name. Generated semantic JNI is preferred. Stock Chromium compressed `J.N` selectors are read from the target build's own DEX by `DexNativeSelectorResolver`, never copied from another version.
 
 #### Tier 3: filesystem compatibility fallback
 
-If neither reservation-source preservation nor Chromium source rename succeeds, ChromeX uses a narrow transactional same-directory filesystem replacement, then reconciles DownloadInfo/history/media metadata. Browsers that expose the legacy `DownloadManagerService#getAllDownloads` capability receive a backend refresh; browsers without that method are left untouched.
+If source reservation and source rename fail, ChromeX uses the narrow transactional same-directory replacement and then reconciles DownloadInfo/history/media metadata. `DownloadManagerService#getAllDownloads` is invoked only when that capability actually exists.
 
 ## Homepage and new tabs
 
-Homepage resolution is based on Chromium's semantic data flow (`PrefService` homepage preference -> GURL), not a `HomepageManager` implementation name.
+Homepage discovery follows Chromium semantic data flow (`PrefService` homepage preference -> GURL). New-tab redirection first intercepts the common `TabCreatorUtil.launchNtp` decision before Chromium materializes the NTP URL. Older/forked builds fall back to `TabModel` and structural `LoadUrlParams -> Tab` creator rewriting.
 
-Tab-model discovery uses stable types and structural methods such as `(boolean) -> TabModel`. Tab creation uses the semantic shape `LoadUrlParams ... -> Tab` and live object graphs where necessary.
+## Startup and tab history
+
+`no-restore-state` remains the earliest supported restore suppression when available. Otherwise ChromeX prefers Chromium's real tab-state-ready event and only uses delayed lifecycle rounds as a compatibility fallback.
+
+Tab closure uses `TabClosureParams.allowUndo(false)` and `saveToTabRestoreService(false)` whenever possible. If restore history still needs clearing, `RecentlyClosedBridge.clearRecentlyClosedEntries()` is preferred because it reaches Chromium's real TabRestoreService. Chrome 145/152 exact cleaners remain last-resort fallbacks only.
+
+## Download dialogs
+
+Dangerous, insecure, policy and open confirmations continue through Chromium's own accepted/onConfirmed callbacks; ChromeX does not falsify security state fields.
+
+Download-location suppression is different: Chromium already owns a prompt preference source. ChromeX returns `DownloadPromptStatus.DONT_SHOW` from the source getter while the option is enabled. The existing `showDialog` callback interception remains only for builds that do not expose the source getter.
 
 ## Compatibility policy
 
 When a new Chromium-family browser is added:
 
-- First inspect the capability report and diagnostic export.
-- Add a new semantic/structural binding only when a capability cannot be resolved.
-- Do not add a browser-specific feature implementation when the behavior can be expressed by an existing capability.
-- Do not hard-code new R8 short names or JNI selectors unless they are isolated as an exact verified fallback.
-- Keep physical-file, history/UI and exact-build workarounds as fallbacks behind the canonical Chromium source path.
+- Inspect the capability report and diagnostic export first.
+- Add a semantic/structural binding only when a capability cannot be resolved.
+- Do not create browser-specific feature implementations when an existing capability expresses the behavior.
+- Do not hard-code R8 short names or JNI selectors except inside isolated verified fallbacks.
+- Preserve known working fallbacks when adding a new source-first path.
+- A source binding must fail closed: ambiguous resolution means skip it and use the next fallback.
 
 ## Diagnostics
 
 Important runtime logs include:
 
 - `Chromium capabilities resolved`
+- `Chromium engine version bound from VersionInfo`
+- `new-tab redirected at Chromium source`
+- `tab restore-ready source bound`
+- `cold-start cleanup triggered by tab-state-ready`
+- `recently-closed source cleared through RecentlyClosedBridge`
+- `OfflineContent lifecycle source bound`
+- `OfflineItem state field learned structurally`
+- `download completion through universal pipeline ... source=OfflineContentAggregator`
+- `download location source policy bound`
 - `three-tier same-name overwrite installed`
 - `same-name overwrite reservation armed`
 - `same-name overwrite preserved original at reservation source`
-- `offline rename binding installed`
-- `offline rename structural JNI resolved`
 - `offline source rename requested`
-- `same-name overwrite source normalized`
 - `same-name overwrite fallback normalized`
-- `download backend refresh requested after normalization`
-- `tab creator capability bound`
-- `universal cold start settled`
 
-These logs are intended to make a future browser/version diagnosable without first writing browser-specific Hook code.
+These logs are designed to diagnose a new browser/version before any browser-specific Hook is written.

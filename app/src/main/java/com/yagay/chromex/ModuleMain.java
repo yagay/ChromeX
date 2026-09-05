@@ -62,8 +62,9 @@ public final class ModuleMain extends XposedModule {
                 + " appVersion=" + runtime.versionName
                 + " engine=" + profile.engineVersion);
 
-        BrowserCapabilities capabilities =
-                new ChromiumCapabilityResolver(profile, runtime, hooks).resolve();
+        ResolvedBindings bindings =
+                new ChromiumCapabilityResolver(profile, runtime, hooks).resolveBindings();
+        BrowserCapabilities capabilities = bindings.capabilities;
         if (!capabilities.has(BrowserCapabilities.Key.CORE_RUNTIME, 60)) {
             hooks.warn("Target rejected after capability probe: not enough Chromium anchors :: "
                     + capabilities.get(BrowserCapabilities.Key.CORE_RUNTIME).detail);
@@ -71,7 +72,7 @@ public final class ModuleMain extends XposedModule {
             return;
         }
 
-        new ChromiumFeatureOrchestrator(profile, capabilities, runtime, hooks, prefs).install();
+        new ChromiumFeatureOrchestrator(profile, bindings, runtime, hooks, prefs).install();
 
         try {
             Diagnostics.scheduleScan(prefs, runtime.classLoader);
@@ -93,9 +94,7 @@ public final class ModuleMain extends XposedModule {
     }
 
     @Override
-    public boolean onHotReloading(HotReloadingParam param) {
-        return true;
-    }
+    public boolean onHotReloading(HotReloadingParam param) { return true; }
 
     @Override
     public void onHotReloaded(HotReloadedParam param) {

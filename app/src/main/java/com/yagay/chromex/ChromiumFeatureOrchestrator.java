@@ -2,20 +2,22 @@ package com.yagay.chromex;
 
 import android.content.SharedPreferences;
 
-/** Installs universal feature engines from semantic runtime capabilities. */
+/** Installs universal feature engines from one resolved semantic binding registry. */
 final class ChromiumFeatureOrchestrator {
     private final ChromiumProfile profile;
+    private final ResolvedBindings bindings;
     private final BrowserCapabilities capabilities;
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
     private OfflineContentRenameBinding renameBinding;
 
-    ChromiumFeatureOrchestrator(ChromiumProfile profile, BrowserCapabilities capabilities,
+    ChromiumFeatureOrchestrator(ChromiumProfile profile, ResolvedBindings bindings,
                                 ChromeRuntime runtime, HookSupport hooks,
                                 SharedPreferences prefs) {
         this.profile = profile;
-        this.capabilities = capabilities;
+        this.bindings = bindings;
+        this.capabilities = bindings.capabilities;
         this.runtime = runtime;
         this.hooks = hooks;
         this.prefs = prefs;
@@ -44,7 +46,7 @@ final class ChromiumFeatureOrchestrator {
         if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 70)
                 || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 70)
                 || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_COMPLETION, 70)) {
-            skip("same-name overwrite", "duplicate/info/completion capability incomplete");
+            skip("same-name overwrite", "duplicate/info/legacy-completion capability incomplete");
             return;
         }
         install("same-name overwrite", () ->
@@ -70,24 +72,22 @@ final class ChromiumFeatureOrchestrator {
             return;
         }
         install("tabs/homepage", () ->
-                new UniversalTabsHooks(profile, capabilities, runtime, hooks, prefs).install());
+                new UniversalTabsHooks(profile, capabilities, runtime, hooks, prefs, bindings).install());
     }
 
     private void installDownloads() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)) {
-            skip("downloads", "DownloadInfo unavailable");
+        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
+                && !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_LIFECYCLE, 70)) {
+            skip("downloads", "DownloadInfo and OfflineContent lifecycle unavailable");
             return;
         }
         install("downloads", () ->
-                new ChromiumDownloadHooks(profile, runtime, hooks, prefs).install());
+                new ChromiumDownloadHooks(profile, runtime, hooks, prefs, bindings).install());
     }
 
     private void install(String name, Runnable installer) {
-        try {
-            installer.run();
-        } catch (Throwable t) {
-            hooks.error("capability feature install failed: " + name, t);
-        }
+        try { installer.run(); }
+        catch (Throwable t) { hooks.error("capability feature install failed: " + name, t); }
     }
 
     private void skip(String feature, String reason) {

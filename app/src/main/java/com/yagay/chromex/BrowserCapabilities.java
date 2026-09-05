@@ -7,33 +7,32 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * Runtime capability map for one Chromium-family browser build.
- *
- * <p>Feature code should depend on semantic capabilities instead of package names, app versions,
- * or R8 symbols. Exact Chrome builds simply contribute high-confidence bindings to this map;
- * unknown/vendor forks are resolved from stable types, signatures, Dex semantics and live object
- * structure.</p>
- */
+/** Runtime capability map for one Chromium-family browser build. */
 final class BrowserCapabilities {
     enum Key {
         CORE_RUNTIME,
+        ENGINE_VERSION,
         TABBED_ACTIVITY,
         GURL,
         PROFILE,
         PREF_SERVICE,
         TAB_MODEL,
         TAB_CREATOR,
+        NEW_TAB_SOURCE,
         HOMEPAGE,
         RESTORE_CONTROL,
+        TAB_STATE_READY,
+        RECENTLY_CLOSED,
         DOWNLOAD_INFO,
         DOWNLOAD_COMPLETION,
         DOWNLOAD_DUPLICATE_CONFLICT,
         DOWNLOAD_CONFLICT_POLICY,
         DOWNLOAD_HISTORY,
         DOWNLOAD_OFFLINE_UI,
+        DOWNLOAD_OFFLINE_LIFECYCLE,
         DOWNLOAD_RENAME,
         DOWNLOAD_OPEN,
+        DOWNLOAD_LOCATION_POLICY,
         DOWNLOAD_LOCATION_DIALOG,
         TRANSLATE_MESSAGE
     }
@@ -92,8 +91,8 @@ final class BrowserCapabilities {
         }
 
         /**
-         * Duplicate bridge + completion + DownloadInfo are enough to virtualize Chromium's path
-         * reservation policy by temporarily vacating the old target before confirmation.
+         * Duplicate bridge + any authoritative completion signal + DownloadInfo are enough to
+         * virtualize Chromium's path reservation policy by temporarily vacating the old target.
          */
         private void deriveConflictPolicy() {
             if (values.containsKey(Key.DOWNLOAD_CONFLICT_POLICY)) return;
@@ -125,9 +124,7 @@ final class BrowserCapabilities {
         this.entries.putAll(values);
     }
 
-    static Builder builder() {
-        return new Builder();
-    }
+    static Builder builder() { return new Builder(); }
 
     boolean has(Key key) {
         Entry entry = entries.get(key);
@@ -139,9 +136,7 @@ final class BrowserCapabilities {
         return entry != null && entry.available && entry.confidence >= minimumConfidence;
     }
 
-    Entry get(Key key) {
-        return entries.get(key);
-    }
+    Entry get(Key key) { return entries.get(key); }
 
     List<Entry> entries() {
         return Collections.unmodifiableList(new ArrayList<>(entries.values()));

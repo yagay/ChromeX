@@ -1,11 +1,6 @@
 package com.yagay.chromex;
 
-/**
- * Compatibility descriptor for Chromium feature code.
- *
- * <p>Verified Chrome builds expose exact fallback symbols. Unknown Chromium builds use the
- * ADAPTIVE family and resolve their engine version and capabilities structurally at runtime.</p>
- */
+/** Compatibility descriptor for Chromium feature code. */
 final class ChromiumProfile {
     enum Family {
         CHROME_145,
@@ -18,7 +13,7 @@ final class ChromiumProfile {
     final Family family;
     /** Application/package version (for example Lemur 2.7.3.019). */
     final String versionName;
-    /** Actual Chromium product version when it can be resolved (for example 127.0.6533.144). */
+    /** Actual Chromium product version (for example 127.0.6533.144). */
     final String engineVersion;
     final int engineMajorVersion;
     final long coldDelayMs;
@@ -48,31 +43,15 @@ final class ChromiumProfile {
                     500L, 600L, 6);
         }
 
-        String engine = hooks == null
-                ? runtime.versionName : AdaptiveDexResolver.resolveProductVersion(runtime, hooks);
-        if (hooks != null && !ChromiumEngineVersionScanner.plausible(engine)) {
-            String scanned = ChromiumEngineVersionScanner.scan(runtime, hooks);
-            if (scanned != null) engine = scanned;
-        }
+        String engine = EngineVersionBinding.resolve(runtime, hooks);
         return new ChromiumProfile(Family.ADAPTIVE, runtime.versionName, engine,
                 700L, 800L, 6);
     }
 
-    boolean is145() {
-        return family == Family.CHROME_145;
-    }
-
-    boolean is152() {
-        return family == Family.CHROME_152;
-    }
-
-    boolean isAdaptive() {
-        return family == Family.ADAPTIVE;
-    }
-
-    boolean isVerifiedExact() {
-        return !isAdaptive();
-    }
+    boolean is145() { return family == Family.CHROME_145; }
+    boolean is152() { return family == Family.CHROME_152; }
+    boolean isAdaptive() { return family == Family.ADAPTIVE; }
+    boolean isVerifiedExact() { return !isAdaptive(); }
 
     String label() {
         if (is152()) return "Chrome 152";

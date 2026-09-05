@@ -9,23 +9,18 @@ import android.os.Looper;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Universal tab/homepage engine for Chrome and Chromium forks.
- *
- * <p>Binding order: stable API -> verified exact fallback -> semantic Dex resolver -> live object
- * graph. Feature behavior (cold start, new-tab redirect, exit cleanup) is shared for every build.</p>
- */
+/** Source-first tab/homepage engine with creator and timing fallbacks. */
 final class UniversalTabsHooks {
     private static final String COMMAND_LINE = "org.chromium.base.CommandLine";
     private static final String TAB_SELECTOR = "org.chromium.chrome.browser.tabmodel.TabModelSelector";
     private static final String TAB = "org.chromium.chrome.browser.tab.Tab";
-    private static final String LOAD_URL_PARAMS =
-            "org.chromium.content_public.browser.LoadUrlParams";
+    private static final String LOAD_URL_PARAMS = "org.chromium.content_public.browser.LoadUrlParams";
 
     private final ChromiumProfile profile;
     private final BrowserCapabilities capabilities;
@@ -33,30 +28,39 @@ final class UniversalTabsHooks {
     private final ClassLoader loader;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
+    private final ResolvedBindings bindings;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Set<Activity> handled = Collections.newSetFromMap(new WeakHashMap<>());
+    private final Set<Activity> coldLaunched = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<String> hookedCreators = ConcurrentHashMap.newKeySet();
     private final ChromiumHistoryFallback history;
+    private final RecentlyClosedBinding recentlyClosed;
     private final Method adaptiveHomepageGetter;
 
     UniversalTabsHooks(ChromiumProfile profile, BrowserCapabilities capabilities,
-                       ChromeRuntime runtime, HookSupport hooks, SharedPreferences prefs) {
+                       ChromeRuntime runtime, HookSupport hooks, SharedPreferences prefs,
+                       ResolvedBindings bindings) {
         this.profile = profile;
         this.capabilities = capabilities;
         this.runtime = runtime;
         this.loader = runtime.classLoader;
         this.hooks = hooks;
         this.prefs = prefs;
+        this.bindings = bindings;
         this.history = new ChromiumHistoryFallback(profile, loader, hooks);
-        this.adaptiveHomepageGetter = profile.isAdaptive()
-                ? AdaptiveDexResolver.resolveHomepageGetter(runtime, hooks) : null;
+        this.recentlyClosed = new RecentlyClosedBinding(
+                runtime, hooks, bindings == null ? null : bindings.recentlyClosedClear);
+        this.adaptiveHomepageGetter = bindings == null ? null : bindings.homepageGetter;
     }
 
     void install() {
         installHomepageValueFallback();
         installNoRestore();
         installLifecycle();
+        installTabStateReady();
+        installNewTabSource();
         installStableNewTabRedirects();
+        installResolvedCreator();
         installDeclaredLoadUrlCreators();
     }
 
@@ -85,9 +89,8 @@ final class UniversalTabsHooks {
             });
             return;
         }
-
         if (!profile.isVerifiedExact()) {
-            hooks.warn("universal no-restore unavailable; post-restore cleanup will be used");
+            hooks.warn("universal no-restore unavailable; restore-ready cleanup will be used");
             return;
         }
         String owner = profile.is145() ? Chrome145.COMMAND_FLAGS : COMMAND_LINE;
@@ -110,14 +113,14 @@ final class UniversalTabsHooks {
                     if (receiver instanceof Activity && isChromeTabbedActivity((Activity) receiver)) {
                         Activity activity = (Activity) receiver;
                         installLiveCreators(activity);
-                        scheduleColdStart(activity);
+                        registerColdStart(activity);
                     }
                     return result;
                 });
 
         if (hasMethod(Chrome145.ACTIVITY, "moveTaskToBack")) {
-            hooks.exact(loader, Chrome145.ACTIVITY, "moveTaskToBack",
-                    new Class<?>[]{boolean.class}, "chromex:universal:tabs:exit-back", chain -> {
+            hooks.exact(loader, Chrome145.ACTIVITY, "moveTaskToBack", new Class<?>[]{boolean.class},
+                    "chromex:universal:tabs:exit-back", chain -> {
                         Object receiver = chain.getThisObject();
                         if (receiver instanceof Activity && isChromeTabbedActivity((Activity) receiver)
                                 && Config.get(prefs, Config.CLEAR_CLOSED_TABS)) {
@@ -143,6 +146,48 @@ final class UniversalTabsHooks {
         } catch (Throwable ignored) {}
     }
 
+    /** Prefer Chromium's real restore-complete signal over guessing startup delays. */
+    private void installTabStateReady() {
+        Method ready = bindings == null ? null : bindings.tabStateReady;
+        if (ready == null) return;
+        hooks.method(ready, "chromex:universal:tabs:state-ready", chain -> {
+            Object result = chain.proceed();
+            main.post(this::launchPendingColdStarts);
+            return result;
+        });
+        hooks.info("tab restore-ready source bound: "
+                + ready.getDeclaringClass().getName() + '#' + ready.getName());
+    }
+
+    /**
+     * Modern Chromium funnels NTP launches through TabCreatorUtil.launchNtp. Redirect there before
+     * the NTP URL is materialized; creator argument rewriting remains the fallback for old forks.
+     */
+    private void installNewTabSource() {
+        Method source = bindings == null ? null : bindings.newTabSource;
+        if (source == null) return;
+        hooks.method(source, "chromex:universal:tabs:newtab-source", chain -> {
+            if (!Config.get(prefs, Config.NEWTAB_HOME)) return chain.proceed();
+            Object home = homepageGurl(false);
+            String wanted = ChromiumUrlAccessor.text(home);
+            if (wanted == null || wanted.isBlank() || ChromiumUrlAccessor.isNtp(wanted)) {
+                return chain.proceed();
+            }
+            Object creator = chain.getArg(0);
+            Object type = chain.getArg(2);
+            if (creator == null || !(type instanceof Number)) return chain.proceed();
+            try {
+                Object opened = Reflect.call(creator, "launchUrl", wanted,
+                        ((Number) type).intValue());
+                hooks.info("new-tab redirected at Chromium source -> " + wanted);
+                return opened;
+            } catch (Throwable t) {
+                hooks.warn("new-tab source redirect unavailable: " + t.getClass().getSimpleName());
+                return chain.proceed();
+            }
+        });
+    }
+
     private void installStableNewTabRedirects() {
         for (String method : new String[]{
                 "openTabProgrammatically", "createNewTab", "createNewTabWithIndex", "openNewTab"}) {
@@ -157,20 +202,20 @@ final class UniversalTabsHooks {
                         }
                         Object[] args = chain.getArgs().toArray();
                         if (!rewriteCreatorArgs(args, home, wanted)) return chain.proceed();
-                        hooks.info("new-tab redirected through stable TabModel binding -> " + wanted);
+                        hooks.info("new-tab redirected through TabModel fallback -> " + wanted);
                         return chain.proceed(args);
                     });
         }
     }
 
-    /** Hook every declared Chromium creator whose semantic signature is LoadUrlParams -> Tab. */
+    private void installResolvedCreator() {
+        Method creator = bindings == null ? null : bindings.tabCreator;
+        if (creator != null) hookCreatorMethods(creator.getDeclaringClass());
+    }
+
     private void installDeclaredLoadUrlCreators() {
-        for (String owner : new String[]{Chrome145.CHROME_TAB_CREATOR}) {
-            try {
-                Class<?> type = Reflect.cls(loader, owner);
-                hookCreatorMethods(type);
-            } catch (Throwable ignored) {}
-        }
+        try { hookCreatorMethods(Reflect.cls(loader, Chrome145.CHROME_TAB_CREATOR)); }
+        catch (Throwable ignored) {}
     }
 
     private void installLiveCreators(Activity activity) {
@@ -201,8 +246,6 @@ final class UniversalTabsHooks {
                                     + " -> " + wanted);
                             return chain.proceed(args);
                         });
-                hooks.info("tab creator capability bound: "
-                        + method.getDeclaringClass().getName() + '#' + method.getName());
             }
             type = type.getSuperclass();
         }
@@ -217,14 +260,10 @@ final class UniversalTabsHooks {
             if (Chrome145.GURL.equals(arg.getClass().getName()) && ChromiumUrlAccessor.isNtp(arg)) {
                 args[i] = home;
                 changed = true;
-                continue;
-            }
-            if (arg instanceof String && ChromiumUrlAccessor.isNtp((String) arg)) {
+            } else if (arg instanceof String && ChromiumUrlAccessor.isNtp((String) arg)) {
                 args[i] = wanted;
                 changed = true;
-                continue;
-            }
-            if (LOAD_URL_PARAMS.equals(arg.getClass().getName())) {
+            } else if (LOAD_URL_PARAMS.equals(arg.getClass().getName())) {
                 changed |= rewriteLoadParams(arg, home, wanted);
             }
         }
@@ -256,7 +295,7 @@ final class UniversalTabsHooks {
         return changed;
     }
 
-    private void scheduleColdStart(Activity activity) {
+    private void registerColdStart(Activity activity) {
         if (!Config.get(prefs, Config.CLEAN_START)) return;
         Intent intent = activity.getIntent();
         if (intent == null || !Intent.ACTION_MAIN.equals(intent.getAction()) || intent.getData() != null) {
@@ -265,7 +304,27 @@ final class UniversalTabsHooks {
         synchronized (handled) {
             if (!handled.add(activity)) return;
         }
-        main.postDelayed(() -> coldRound(activity, 0), profile.coldDelayMs);
+        if (isTabStateInitialized(activity)) {
+            main.post(() -> launchColdStart(activity, "already-ready"));
+        } else {
+            long fallback = Math.max(1400L, profile.coldDelayMs * 3L);
+            main.postDelayed(() -> launchColdStart(activity, "timing-fallback"), fallback);
+        }
+    }
+
+    private void launchPendingColdStarts() {
+        ArrayList<Activity> activities;
+        synchronized (handled) { activities = new ArrayList<>(handled); }
+        for (Activity activity : activities) launchColdStart(activity, "tab-state-ready");
+    }
+
+    private void launchColdStart(Activity activity, String source) {
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        synchronized (coldLaunched) {
+            if (!coldLaunched.add(activity)) return;
+        }
+        hooks.info("cold-start cleanup triggered by " + source);
+        coldRound(activity, 0);
     }
 
     private void coldRound(Activity activity, int round) {
@@ -296,9 +355,10 @@ final class UniversalTabsHooks {
 
             int count = count(regular);
             if (count <= 1 || round + 1 >= profile.maxRounds) {
-                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS)
-                        && !restoreSuppressed && profile.isVerifiedExact()) {
-                    history.clear(activity, "cold-start-fallback");
+                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS) && !restoreSuppressed) {
+                    if (!recentlyClosed.clear(activity, "cold-start") && profile.isVerifiedExact()) {
+                        history.clear(activity, "cold-start-fallback");
+                    }
                 }
                 hooks.info("universal cold start settled at round " + round
                         + " tabs=" + count + " homepage=" + wanted
@@ -330,90 +390,15 @@ final class UniversalTabsHooks {
             if (incognito != null && incognito != regular) {
                 restoreSuppressed &= TabCloseStrategy.closeAll(loader, incognito, hooks, true);
             }
-            if (!restoreSuppressed && profile.isVerifiedExact()) history.clear(activity, reason);
+            if (!restoreSuppressed) {
+                if (!recentlyClosed.clear(activity, reason) && profile.isVerifiedExact()) {
+                    history.clear(activity, reason);
+                }
+            }
             hooks.info("universal exit tab cleanup via " + reason
                     + " restoreSuppressed=" + restoreSuppressed);
         } catch (Throwable t) {
             hooks.error("universal exit cleanup via " + reason, t);
-        }
-    }
-
-    private Object model(Activity activity, boolean incognito) {
-        if (activity == null) return null;
-        try {
-            Class<?> selectorType = Reflect.cls(loader, TAB_SELECTOR);
-            Object selector = Reflect.findFieldValueByType(activity, selectorType);
-            Object model = stableSelectorModel(selector, incognito);
-            if (model != null) return model;
-        } catch (Throwable ignored) {}
-
-        if (profile.is152()) {
-            try {
-                Object selector = Reflect.get(activity, Chrome152.ACTIVITY_SELECTOR_FIELD);
-                if (selector == null) {
-                    selector = Reflect.findFieldValueByType(activity,
-                            Reflect.cls(loader, Chrome152.TAB_SELECTOR));
-                }
-                if (selector != null) {
-                    Object value = Reflect.call(selector, "k", incognito);
-                    if (value != null) return value;
-                }
-            } catch (Throwable ignored) {}
-        } else if (profile.is145()) {
-            try {
-                Object selector = Reflect.findFieldValueByType(
-                        activity, Reflect.cls(loader, Chrome145.SELECTOR));
-                if (selector != null) {
-                    Object value = Reflect.call(selector, "l", incognito);
-                    if (value != null) return value;
-                }
-            } catch (Throwable ignored) {}
-        }
-
-        return structuralModel(activity, incognito);
-    }
-
-    private Object stableSelectorModel(Object selector, boolean incognito) {
-        if (selector == null) return null;
-        for (String name : new String[]{"getModel", "getTabModel"}) {
-            try {
-                Object value = Reflect.call(selector, name, incognito);
-                if (value != null) return value;
-            } catch (Throwable ignored) {}
-        }
-        return null;
-    }
-
-    private Object structuralModel(Activity activity, boolean incognito) {
-        try {
-            Class<?> tabModelType = Reflect.cls(loader, Chrome145.TAB_MODEL_API);
-            final Object[] result = new Object[1];
-            forEachActivityField(activity, candidate -> {
-                if (result[0] != null) return;
-                Class<?> type = candidate.getClass();
-                while (type != null && type != Object.class && result[0] == null) {
-                    for (Method method : type.getDeclaredMethods()) {
-                        if (Modifier.isStatic(method.getModifiers())
-                                || !tabModelType.isAssignableFrom(method.getReturnType())) continue;
-                        Class<?>[] p = method.getParameterTypes();
-                        if (p.length != 1 || p[0] != boolean.class) continue;
-                        try {
-                            method.setAccessible(true);
-                            Object value = method.invoke(candidate, incognito);
-                            if (value != null) {
-                                result[0] = value;
-                                hooks.info("TabModel capability bound from live graph: "
-                                        + method.getDeclaringClass().getName() + '#' + method.getName());
-                                break;
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                    type = type.getSuperclass();
-                }
-            });
-            return result[0];
-        } catch (Throwable ignored) {
-            return null;
         }
     }
 
@@ -437,15 +422,14 @@ final class UniversalTabsHooks {
             try {
                 Class<?> owner = Reflect.cls(loader, Chrome152.HOMEPAGE);
                 Object instance = Reflect.callStatic(owner, "d");
-                Object value = instance == null ? null
-                        : Reflect.call(instance, "b", Boolean.FALSE, forZeroTabs);
+                Object value = instance == null ? null : Reflect.call(instance, "b", false, forZeroTabs);
                 if (value != null) return value;
             } catch (Throwable ignored) {}
         } else if (profile.is145()) {
             try {
                 Class<?> owner = Reflect.cls(loader, Chrome145.HOMEPAGE);
                 Object instance = Reflect.callStatic(owner, "d");
-                Object value = instance == null ? null : Reflect.call(instance, "b", Boolean.FALSE);
+                Object value = instance == null ? null : Reflect.call(instance, "b", false);
                 if (value != null) return value;
             } catch (Throwable ignored) {}
         }
@@ -464,8 +448,7 @@ final class UniversalTabsHooks {
             Object tab = tabAt(model, i);
             if (tab == null) continue;
             try {
-                Object raw = Reflect.call(tab, "getUrl");
-                String current = ChromiumUrlAccessor.text(raw);
+                String current = ChromiumUrlAccessor.text(Reflect.call(tab, "getUrl"));
                 if (wanted.equals(current)
                         || (ChromiumUrlAccessor.isNtp(wanted) && ChromiumUrlAccessor.isNtp(current))) {
                     return tab;
@@ -478,7 +461,6 @@ final class UniversalTabsHooks {
     private Object openHomeTab(Activity activity, Object model, Object home) {
         Object opened = invokeModelCreator(model, home);
         if (opened != null) return opened;
-
         final Object[] result = new Object[1];
         forEachActivityField(activity, candidate -> {
             if (result[0] != null) return;
@@ -489,15 +471,10 @@ final class UniversalTabsHooks {
                     try {
                         Object load = buildLoadParams(home);
                         if (load == null) continue;
-                        Object[] args = defaultArgs(method.getParameterTypes(), load);
                         method.setAccessible(true);
-                        Object value = method.invoke(candidate, args);
-                        if (value != null) {
-                            result[0] = value;
-                            hooks.info("home tab opened via structural creator "
-                                    + method.getDeclaringClass().getName() + '#' + method.getName());
-                            break;
-                        }
+                        Object value = method.invoke(candidate,
+                                defaultArgs(method.getParameterTypes(), load));
+                        if (value != null) { result[0] = value; break; }
                     } catch (Throwable ignored) {}
                 }
                 type = type.getSuperclass();
@@ -511,23 +488,16 @@ final class UniversalTabsHooks {
         Class<?> type = model.getClass();
         while (type != null && type != Object.class) {
             for (Method method : type.getDeclaredMethods()) {
-                if (Modifier.isStatic(method.getModifiers()) || Modifier.isAbstract(method.getModifiers())) {
-                    continue;
-                }
+                if (Modifier.isStatic(method.getModifiers()) || Modifier.isAbstract(method.getModifiers())) continue;
                 String name = method.getName();
                 if (!name.equals("openTabProgrammatically") && !name.equals("createNewTab")
-                        && !name.equals("createNewTabWithIndex") && !name.equals("openNewTab")) {
-                    continue;
-                }
+                        && !name.equals("createNewTabWithIndex") && !name.equals("openNewTab")) continue;
                 Class<?>[] p = method.getParameterTypes();
                 if (p.length == 0 || !Chrome145.GURL.equals(p[0].getName())) continue;
                 try {
                     method.setAccessible(true);
                     Object value = method.invoke(model, defaultArgs(p, home));
-                    if (value != null) {
-                        hooks.info("home tab opened via model creator " + name);
-                        return value;
-                    }
+                    if (value != null) return value;
                 } catch (Throwable ignored) {}
             }
             type = type.getSuperclass();
@@ -536,20 +506,14 @@ final class UniversalTabsHooks {
     }
 
     private Object buildLoadParams(Object home) {
-        try {
-            Class<?> type = Reflect.cls(loader, LOAD_URL_PARAMS);
-            return Reflect.construct(type, home);
-        } catch (Throwable ignored) {}
+        try { return Reflect.construct(Reflect.cls(loader, LOAD_URL_PARAMS), home); }
+        catch (Throwable ignored) {}
         String spec = ChromiumUrlAccessor.text(home);
         if (spec == null) return null;
-        try {
-            return Reflect.construct(Reflect.cls(loader, LOAD_URL_PARAMS), spec, 0);
-        } catch (Throwable ignored) {}
-        try {
-            return Reflect.construct(Reflect.cls(loader, LOAD_URL_PARAMS), spec);
-        } catch (Throwable ignored) {
-            return null;
-        }
+        try { return Reflect.construct(Reflect.cls(loader, LOAD_URL_PARAMS), spec, 0); }
+        catch (Throwable ignored) {}
+        try { return Reflect.construct(Reflect.cls(loader, LOAD_URL_PARAMS), spec); }
+        catch (Throwable ignored) { return null; }
     }
 
     private Object[] defaultArgs(Class<?>[] types, Object first) {
@@ -558,11 +522,9 @@ final class UniversalTabsHooks {
         boolean launchTypeAssigned = false;
         for (int i = 1; i < types.length; i++) {
             Class<?> type = types[i];
-            if (type == boolean.class) args[i] = Boolean.FALSE;
-            else if (type == int.class) {
-                args[i] = launchTypeAssigned ? 0 : 2;
-                launchTypeAssigned = true;
-            } else if (type == long.class) args[i] = 0L;
+            if (type == boolean.class) args[i] = false;
+            else if (type == int.class) { args[i] = launchTypeAssigned ? 0 : 2; launchTypeAssigned = true; }
+            else if (type == long.class) args[i] = 0L;
             else if (type == float.class) args[i] = 0f;
             else if (type == double.class) args[i] = 0d;
             else if (type == short.class) args[i] = (short) 0;
@@ -571,6 +533,89 @@ final class UniversalTabsHooks {
             else args[i] = null;
         }
         return args;
+    }
+
+    private Object model(Activity activity, boolean incognito) {
+        if (activity == null) return null;
+        Object selector = selector(activity);
+        Object model = stableSelectorModel(selector, incognito);
+        if (model != null) return model;
+        return structuralModel(activity, incognito);
+    }
+
+    private Object selector(Activity activity) {
+        try {
+            Class<?> selectorType = Reflect.cls(loader, TAB_SELECTOR);
+            Object selector = Reflect.findFieldValueByType(activity, selectorType);
+            if (selector != null) return selector;
+        } catch (Throwable ignored) {}
+        if (profile.is152()) {
+            try {
+                Object selector = Reflect.get(activity, Chrome152.ACTIVITY_SELECTOR_FIELD);
+                if (selector != null) return selector;
+            } catch (Throwable ignored) {}
+        }
+        if (profile.is145()) {
+            try {
+                Object selector = Reflect.findFieldValueByType(activity,
+                        Reflect.cls(loader, Chrome145.SELECTOR));
+                if (selector != null) return selector;
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private boolean isTabStateInitialized(Activity activity) {
+        Object selector = selector(activity);
+        if (selector != null) {
+            try {
+                Object value = Reflect.call(selector, "isTabStateInitialized");
+                if (value instanceof Boolean) return (Boolean) value;
+            } catch (Throwable ignored) {}
+        }
+        return false;
+    }
+
+    private Object stableSelectorModel(Object selector, boolean incognito) {
+        if (selector == null) return null;
+        for (String name : new String[]{"getModel", "getTabModel"}) {
+            try {
+                Object value = Reflect.call(selector, name, incognito);
+                if (value != null) return value;
+            } catch (Throwable ignored) {}
+        }
+        if (profile.is152()) {
+            try { return Reflect.call(selector, "k", incognito); } catch (Throwable ignored) {}
+        } else if (profile.is145()) {
+            try { return Reflect.call(selector, "l", incognito); } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private Object structuralModel(Activity activity, boolean incognito) {
+        try {
+            Class<?> tabModelType = Reflect.cls(loader, Chrome145.TAB_MODEL_API);
+            final Object[] result = new Object[1];
+            forEachActivityField(activity, candidate -> {
+                if (result[0] != null) return;
+                Class<?> type = candidate.getClass();
+                while (type != null && type != Object.class && result[0] == null) {
+                    for (Method method : type.getDeclaredMethods()) {
+                        if (Modifier.isStatic(method.getModifiers())
+                                || !tabModelType.isAssignableFrom(method.getReturnType())) continue;
+                        Class<?>[] p = method.getParameterTypes();
+                        if (p.length != 1 || p[0] != boolean.class) continue;
+                        try {
+                            method.setAccessible(true);
+                            Object value = method.invoke(candidate, incognito);
+                            if (value != null) { result[0] = value; break; }
+                        } catch (Throwable ignored) {}
+                    }
+                    type = type.getSuperclass();
+                }
+            });
+            return result[0];
+        } catch (Throwable ignored) { return null; }
     }
 
     private int count(Object model) {
@@ -597,9 +642,7 @@ final class UniversalTabsHooks {
             Class<?> tabType = Reflect.cls(loader, TAB);
             Method method = uniqueMethod(model.getClass(), tabType, int.class);
             return method == null ? null : method.invoke(model, index);
-        } catch (Throwable ignored) {
-            return null;
-        }
+        } catch (Throwable ignored) { return null; }
     }
 
     private boolean isLoadUrlCreator(Method method) {
@@ -623,9 +666,7 @@ final class UniversalTabsHooks {
                 found = method;
             }
             return found;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        } catch (Throwable ignored) { return null; }
     }
 
     private Method uniqueMethod(Class<?> start, Class<?> returnType, Class<?>... params) {
@@ -684,7 +725,5 @@ final class UniversalTabsHooks {
         catch (Throwable ignored) { return false; }
     }
 
-    private interface ObjectConsumer {
-        void accept(Object value);
-    }
+    private interface ObjectConsumer { void accept(Object value); }
 }
