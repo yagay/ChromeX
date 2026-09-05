@@ -1,17 +1,21 @@
 package com.yagay.chromex;
 
-/** Selects the safest usable backend based on the capability probe. */
+/** Selects the safest usable backend based on the classified extension runtime family. */
 public final class ExtensionBackendSelector {
     private ExtensionBackendSelector() {}
 
     public static ExtensionBackend select(ExtensionCapabilityReport report, ClassLoader classLoader) {
         if (report == null) return new UnavailableExtensionBackend();
         switch (report.mode) {
-            case FULL: {
-                NativeExtensionBackend nativeBackend = new NativeExtensionBackend(report, classLoader);
-                if (nativeBackend.isAvailable()) return nativeBackend;
-                // Native Extension Core may be present while a vendor exposes a different Java
-                // bridge. Keep useful content-script support rather than failing the whole feature.
+            case GOOGLE_DESKTOP_FULL: {
+                GoogleDesktopExtensionBackend google =
+                        new GoogleDesktopExtensionBackend(report, classLoader);
+                if (google.isAvailable()) return google;
+                return new LiteExtensionBackend(report);
+            }
+            case VENDOR_FULL: {
+                NativeExtensionBackend vendor = new NativeExtensionBackend(report, classLoader);
+                if (vendor.isAvailable()) return vendor;
                 return new LiteExtensionBackend(report);
             }
             case LITE:
