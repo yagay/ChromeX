@@ -9,10 +9,9 @@ import java.lang.reflect.Modifier;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * Narrow runtime corrections for Chrome 152.0.7977.x.
- *
- * Keep this class small: it intentionally layers only fixes for signatures that compile-time
- * checks cannot validate against Chrome's runtime DEX.
+ * One narrow runtime correction that remains separate until the Chrome 152 profile is regenerated:
+ * OpenDownloadDialogBridge's J.N.VJOZ third parameter is String, not Object. No other method is
+ * duplicated here.
  */
 final class Chrome152Corrections {
     private final HookSupport hooks;
@@ -27,43 +26,6 @@ final class Chrome152Corrections {
     }
 
     void install() {
-        installPreciseNewTabRedirect();
-        installOpenDialogCorrection();
-    }
-
-    private void installPreciseNewTabRedirect() {
-        // Verified in 152.0.7977.75: iq4#m(...) is the primary ChromeTabCreator#createNewTab path
-        // and LoadUrlParams.a contains the URL. This precise hook supplements the broader profile
-        // and uses GURL.getSpec() first, which is retained in this build.
-        hooks.all(loader, Chrome152.TAB_CREATOR, "m",
-                "chromex152:correction:newtab-m", chain -> {
-                    if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
-                        return chain.proceed();
-                    }
-                    Object params = chain.getArg(0);
-                    if (params == null || !Chrome145.LOAD_URL_PARAMS.equals(params.getClass().getName())) {
-                        return chain.proceed();
-                    }
-                    try {
-                        Object raw = Reflect.get(params, Chrome152.LOAD_URL_FIELD);
-                        if (!(raw instanceof String) || !isNtp((String) raw)) return chain.proceed();
-                        String home = homepage();
-                        if (home != null && !home.isBlank() && !isNtp(home)) {
-                            Reflect.set(params, Chrome152.LOAD_URL_FIELD, home);
-                            hooks.info("Chrome 152 precise new-tab redirect applied");
-                        }
-                    } catch (Throwable t) {
-                        hooks.error("Chrome 152 precise new-tab redirect", t);
-                    }
-                    return chain.proceed();
-                });
-    }
-
-    private void installOpenDialogCorrection() {
-        // Verified from Chrome 152.0.7977.75 DEX:
-        // J.N.VJOZ(int selector, long nativePtr, String path, boolean confirmed)
-        // selector 9 + true means accept/open. The generic profile previously used Object.class
-        // for the third reflective parameter, which cannot resolve the actual String signature.
         hooks.all(loader,
                 "org.chromium.chrome.browser.download.OpenDownloadDialogBridge",
                 "showDialog", "chromex152:correction:open-dialog", chain -> {
@@ -84,30 +46,6 @@ final class Chrome152Corrections {
                         return chain.proceed();
                     }
                 });
-    }
-
-    private String homepage() {
-        try {
-            Class<?> manager = Reflect.cls(loader, Chrome152.HOMEPAGE);
-            Object instance = Reflect.callStatic(manager, "d");
-            if (instance == null) return Chrome145.NTP;
-            Object gurl = Reflect.call(instance, "e", Boolean.FALSE);
-            if (gurl == null) return Chrome145.NTP;
-            for (String method : new String[]{"getSpec", "j"}) {
-                try {
-                    Object value = Reflect.call(gurl, method);
-                    if (value instanceof String) return (String) value;
-                } catch (Throwable ignored) {}
-            }
-            try {
-                Object value = Reflect.get(gurl, "a");
-                if (value instanceof String) return (String) value;
-            } catch (Throwable ignored) {}
-        } catch (Throwable t) {
-            hooks.warn("Chrome 152 corrected homepage lookup unavailable: "
-                    + t.getClass().getSimpleName());
-        }
-        return Chrome145.NTP;
     }
 
     private long nativePtr(Object bridge) {
@@ -134,11 +72,6 @@ final class Chrome152Corrections {
         } catch (Throwable ignored) {
             return 0L;
         }
-    }
-
-    private static boolean isNtp(String value) {
-        return value != null && (value.startsWith("chrome-native://newtab")
-                || value.startsWith("chrome://newtab"));
     }
 
     private static String lastString(Object[] args) {
