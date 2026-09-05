@@ -13,25 +13,45 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Detects whether the target Chromium build contains a usable native extension runtime.
- * This probe is deliberately read-only: it never hooks or invokes extension internals.
- * Native scanning is streaming so a ~200 MiB libchrome.so is never copied into the Java heap.
+ * Read-only extension capability probe.
+ *
+ * <p>Google Desktop Android and vendor Chromium forks deliberately use different Java bridges, so
+ * they are classified separately. Native scanning is only corroborating evidence: Trichrome can
+ * map Monochrome directly from another APK, where there is no ordinary file path available to this
+ * process. Complete official Android bridge groups therefore count as strong FULL evidence.</p>
  */
 public final class ExtensionCapabilityDetector {
     private static final int SCAN_BUFFER = 1024 * 1024;
 
-    private static final String[] JAVA_CLASSES = {
+    static final String[] CORE_BROWSER_CLASSES = {
             "org.chromium.chrome.browser.ChromeTabbedActivity",
             "org.chromium.ui.base.WindowAndroid",
             "org.chromium.chrome.browser.profiles.Profile",
-            "org.chromium.content_public.browser.WebContents",
+            "org.chromium.content_public.browser.WebContents"
+    };
+
+    static final String[] GOOGLE_DESKTOP_CLASSES = {
+            "org.chromium.chrome.browser.ui.extensions.ExtensionActionsBridge",
+            "org.chromium.chrome.browser.ui.extensions.ExtensionsToolbarBridge",
+            "org.chromium.chrome.browser.ui.extensions.ExtensionActionPopupContents",
+            "org.chromium.chrome.browser.ui.extensions.ExtensionInstallDialogBridge",
+            "org.chromium.chrome.browser.ui.extensions.ExtensionDeveloperPrivateBridge",
+            "org.chromium.chrome.browser.ui.extensions.ExtensionUtilBridge",
+            "org.chromium.chrome.browser.ui.extensions.windowing.ExtensionWindowControllerBridgeImpl",
+            "org.chromium.chrome.browser.toolbar.extensions.ExtensionActionListContainer",
+            "org.chromium.chrome.browser.extensions.ExtensionsUrlOverrideRegistryManager"
+    };
+
+    static final String[] VENDOR_CLASSES = {
             "org.chromium.chrome.browser.extensions.ExtensionSystemManager",
             "org.chromium.chrome.browser.extensions.ExtensionActionBridge",
             "org.chromium.chrome.browser.extensions.ExtensionActionManagerBridge",
-            "org.chromium.chrome.browser.extensions.ExtensionInstallerBridge"
+            "org.chromium.chrome.browser.extensions.ExtensionInstallerBridge",
+            "org.chromium.chrome.browser.extensions.ExtensionDialogUtil",
+            "org.chromium.chrome.browser.ui.extensions.ExtensionActionBridgeController"
     };
 
-    private static final String[] NATIVE_MARKERS = {
+    static final String[] NATIVE_MARKERS = {
             "ExtensionSystemImpl",
             "ExtensionService",
             "ExtensionRegistry",
@@ -40,6 +60,8 @@ public final class ExtensionCapabilityDetector {
             "ExtensionUserScriptLoader",
             "WebRequestEventRouter",
             "ScriptInjection",
+            "ToolbarActionsModel",
+            "BrowserExtensionWindowController",
             "chrome-extension://"
     };
 
@@ -48,21 +70,16 @@ public final class ExtensionCapabilityDetector {
     public static ExtensionCapabilityReport detect(ClassLoader classLoader) {
         List<String> javaHits = new ArrayList<>();
         List<String> javaMisses = new ArrayList<>();
-        for (String name : JAVA_CLASSES) {
-            try {
-                Class.forName(name, false, classLoader);
-                javaHits.add(name);
-            } catch (Throwable ignored) {
-                javaMisses.add(name);
-            }
-        }
+        probeClasses(classLoader, CORE_BROWSER_CLASSES, javaHits, javaMisses);
+        probeClasses(classLoader, GOOGLE_DESKTOP_CLASSES, javaHits, javaMisses);
+        probeClasses(classLoader, VENDOR_CLASSES, javaHits, javaMisses);
 
-        String lib = findMappedChromeLibrary();
+        NativeMapCandidate mapped = findMappedChromiumLibrary();
         List<String> nativeHits = new ArrayList<>();
         List<String> nativeMisses = new ArrayList<>();
-        if (lib != null) {
+        if (mapped != null && mapped.scannablePath != null) {
             try {
-                Set<String> found = scanMarkers(new File(lib), NATIVE_MARKERS);
+                Set<String> found = scanMarkers(new File(mapped.scannablePath), NATIVE_MARKERS);
                 for (String marker : NATIVE_MARKERS) {
                     if (found.contains(marker)) nativeHits.add(marker);
                     else nativeMisses.add(marker);
@@ -74,30 +91,63 @@ public final class ExtensionCapabilityDetector {
             nativeMisses.addAll(Arrays.asList(NATIVE_MARKERS));
         }
 
-        int strongNative = 0;
+        ExtensionRuntimeMode mode = classify(javaHits, nativeHits);
+        String library = mapped == null ? null : mapped.display;
+        return new ExtensionCapabilityReport(mode, javaHits, javaMisses,
+                nativeHits, nativeMisses, library);
+    }
+
+    static ExtensionRuntimeMode classify(List<String> javaHits, List<String> nativeHits) {
+        int core = count(javaHits, CORE_BROWSER_CLASSES);
+        int google = count(javaHits, GOOGLE_DESKTOP_CLASSES);
+        int vendor = count(javaHits, VENDOR_CLASSES);
+
+        int nativeCore = 0;
         for (String marker : new String[]{
                 "ExtensionSystemImpl", "ExtensionService", "ExtensionRegistry",
                 "ExtensionFunctionDispatcher", "ExtensionUserScriptLoader"}) {
-            if (nativeHits.contains(marker)) strongNative++;
+            if (nativeHits != null && nativeHits.contains(marker)) nativeCore++;
         }
-        int strongJava = 0;
-        for (String name : new String[]{
-                "org.chromium.chrome.browser.extensions.ExtensionSystemManager",
-                "org.chromium.chrome.browser.extensions.ExtensionInstallerBridge",
-                "org.chromium.chrome.browser.extensions.ExtensionActionManagerBridge"}) {
-            if (javaHits.contains(name)) strongJava++;
+        int nativeGoogleUi = 0;
+        for (String marker : new String[]{"ToolbarActionsModel", "BrowserExtensionWindowController"}) {
+            if (nativeHits != null && nativeHits.contains(marker)) nativeGoogleUi++;
         }
 
-        ExtensionRuntimeMode mode;
-        // A complete Android-facing bridge is itself strong evidence of a compiled Extension Core.
-        // This also avoids false LITE classification when libchrome.so is mapped directly from an
-        // APK and therefore has no ordinary filesystem path that can be scanned safely.
-        if (strongNative >= 4 || strongJava >= 3) mode = ExtensionRuntimeMode.FULL;
-        else if (hasCoreBrowserAnchors(javaHits)) mode = ExtensionRuntimeMode.LITE;
-        else mode = ExtensionRuntimeMode.NONE;
+        // Official Desktop Android ships a large, characteristic Android bridge surface. Six of
+        // nine official bridge classes is enough even if the shared Trichrome native library is
+        // not directly readable. With native corroboration, four bridge hits are sufficient.
+        if (google >= 6 || (google >= 4 && nativeCore >= 3) || (google >= 4 && nativeGoogleUi >= 1)) {
+            return ExtensionRuntimeMode.GOOGLE_DESKTOP_FULL;
+        }
 
-        return new ExtensionCapabilityReport(mode, javaHits, javaMisses,
-                nativeHits, nativeMisses, lib);
+        // Vendor FULL requires its own management/install/action bridge group or strong native
+        // core plus at least one vendor-specific Java bridge. This prevents generic native strings
+        // in a mobile build from being mistaken for a callable vendor backend.
+        if (vendor >= 3 || (vendor >= 1 && nativeCore >= 4)) {
+            return ExtensionRuntimeMode.VENDOR_FULL;
+        }
+
+        if (core >= 3) return ExtensionRuntimeMode.LITE;
+        return ExtensionRuntimeMode.NONE;
+    }
+
+    private static void probeClasses(ClassLoader loader, String[] names,
+                                     List<String> hits, List<String> misses) {
+        for (String name : names) {
+            try {
+                Class.forName(name, false, loader);
+                hits.add(name);
+            } catch (Throwable ignored) {
+                misses.add(name);
+            }
+        }
+    }
+
+    private static int count(List<String> hits, String[] values) {
+        if (hits == null) return 0;
+        int count = 0;
+        for (String value : values) if (hits.contains(value)) count++;
+        return count;
     }
 
     static Set<String> scanMarkers(File file, String[] markers) throws Exception {
@@ -132,30 +182,38 @@ public final class ExtensionCapabilityDetector {
         return found;
     }
 
-    private static boolean hasCoreBrowserAnchors(List<String> hits) {
-        return containsClass(hits, "org.chromium.chrome.browser.ChromeTabbedActivity")
-                && containsClass(hits, "org.chromium.ui.base.WindowAndroid")
-                && containsClass(hits, "org.chromium.content_public.browser.WebContents");
-    }
-
-    private static boolean containsClass(List<String> hits, String name) {
-        return hits.contains(name);
-    }
-
-    private static String findMappedChromeLibrary() {
+    private static NativeMapCandidate findMappedChromiumLibrary() {
         File maps = new File("/proc/self/maps");
         if (!maps.isFile()) return null;
+        NativeMapCandidate best = null;
         try (BufferedReader reader = new BufferedReader(new FileReader(maps))) {
             for (String line; (line = reader.readLine()) != null;) {
                 int slash = line.indexOf('/');
                 if (slash < 0) continue;
-                String path = line.substring(slash).trim();
-                if (path.endsWith(" (deleted)")) path = path.substring(0, path.length() - 10);
-                File candidate = new File(path);
-                if (path.endsWith("/libchrome.so") && candidate.isFile()) return candidate.getAbsolutePath();
+                String mapped = line.substring(slash).trim();
+                if (mapped.endsWith(" (deleted)")) mapped = mapped.substring(0, mapped.length() - 10);
+                if (!looksLikeChromiumNative(mapped)) continue;
+
+                String filePart = mapped;
+                int bang = filePart.indexOf("!/");
+                if (bang >= 0) filePart = filePart.substring(0, bang);
+                File candidate = new File(filePart);
+                String scan = bang < 0 && candidate.isFile() ? candidate.getAbsolutePath() : null;
+                NativeMapCandidate current = new NativeMapCandidate(mapped, scan);
+                if (scan != null) return current;
+                if (best == null) best = current;
             }
         } catch (Throwable ignored) {}
-        return null;
+        return best;
+    }
+
+    private static boolean looksLikeChromiumNative(String path) {
+        String lower = path.toLowerCase();
+        return lower.contains("libchrome.so")
+                || lower.contains("libmonochrome.so")
+                || lower.contains("libmonochrome_64.so")
+                || lower.contains("trichromelibrary")
+                || lower.contains("trichrome_library");
     }
 
     private static boolean contains(byte[] data, int dataLength, byte[] needle) {
@@ -168,5 +226,15 @@ public final class ExtensionCapabilityDetector {
             return true;
         }
         return false;
+    }
+
+    private static final class NativeMapCandidate {
+        final String display;
+        final String scannablePath;
+
+        NativeMapCandidate(String display, String scannablePath) {
+            this.display = display;
+            this.scannablePath = scannablePath;
+        }
     }
 }
