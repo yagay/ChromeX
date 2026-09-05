@@ -90,9 +90,26 @@ public final class ModuleMain extends XposedModule {
             try {
                 ExtensionCapabilityReport report = ExtensionCapabilityDetector.detect(classLoader);
                 ExtensionBackend backend = ExtensionBackendSelector.select(report, classLoader);
+                ExtensionRuntimeRegistry.set(report, backend);
+
+                boolean liteRuntimeHooked = false;
+                if (backend.mode() == ExtensionRuntimeMode.LITE && backend.isAvailable()) {
+                    liteRuntimeHooked = LiteExtensionRuntime.install(classLoader, hooks);
+                }
+
+                StringBuilder extra = new StringBuilder();
+                if (backend.mode() == ExtensionRuntimeMode.FULL && backend.isAvailable()) {
+                    extra.append("installedExtensions=")
+                            .append(backend.getInstalledExtensionIds().size()).append('\n');
+                }
+                if (backend.mode() == ExtensionRuntimeMode.LITE) {
+                    extra.append("liteRuntimeHooked=").append(liteRuntimeHooked).append('\n');
+                }
+
                 RuntimeDiagnostics.event("INFO", "Extension capability probe\n"
                         + report.toDiagnosticText()
                         + "backend=" + backend.getClass().getSimpleName() + "\n"
+                        + extra
                         + backend.diagnostics());
                 hooks.info("Extension runtime mode=" + report.mode
                         + " backend=" + backend.getClass().getSimpleName()
@@ -124,6 +141,7 @@ public final class ModuleMain extends XposedModule {
 
     @Override
     public void onHotReloaded(HotReloadedParam param) {
+        ExtensionRuntimeRegistry.clear();
         for (HookHandle handle : param.getOldHookHandles()) {
             try { handle.unhook(); } catch (Throwable ignored) {}
         }
