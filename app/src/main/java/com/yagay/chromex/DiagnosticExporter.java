@@ -244,7 +244,9 @@ final class DiagnosticExporter {
             reader.start();
             if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) process.destroyForcibly();
             try { reader.join(1200L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            synchronized (out) { return out.toString(StandardCharsets.UTF_8); }
+            synchronized (out) {
+                return new String(out.toByteArray(), StandardCharsets.UTF_8);
+            }
         } catch (Throwable t) {
             return "COMMAND_ERROR: " + t.getClass().getSimpleName() + ": " + t.getMessage();
         } finally {
