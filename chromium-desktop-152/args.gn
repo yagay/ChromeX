@@ -1,0 +1,21 @@
+# Chromium 152.0.7977.75 Desktop Android / arm64
+# Extension Core is derived by Chromium from is_desktop_android=true.
+
+target_os = "android"
+target_cpu = "arm64"
+
+is_desktop_android = true
+is_debug = false
+is_component_build = false
+is_official_build = false
+
+# Keep a local experimental build small enough for iterative compilation.
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+
+# Do not assume Google-internal RBE infrastructure.
+use_remoteexec = false
+
+# Build Chromium-branded public Trichrome packages rather than proprietary Chrome.
+is_chrome_branded = false
