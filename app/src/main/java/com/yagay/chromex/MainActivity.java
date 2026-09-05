@@ -31,6 +31,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
             {Config.BYPASS_DANGEROUS, "跳过危险文件确认"},
             {Config.BYPASS_INSECURE, "跳过不安全下载确认"},
             {Config.BYPASS_DUPLICATE, "跳过重复下载确认"},
+            {Config.OVERWRITE_DUPLICATE, "同名文件直接覆盖旧文件（优先于重复下载确认）"},
             {Config.BYPASS_POLICY, "跳过下载策略提示"},
             {Config.BYPASS_LOCATION, "跳过保存位置/重命名确认"},
             {Config.BYPASS_OPEN, "跳过打开文件确认"},
