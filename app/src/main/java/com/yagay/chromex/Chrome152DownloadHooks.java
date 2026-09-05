@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Single verified download implementation for Chrome 152.0.7977.75. */
+/** Verified download implementation for Chrome 152.0.7977.75. */
 final class Chrome152DownloadHooks {
     private static final String APK_MIME = "application/vnd.android.package-archive";
     private static final long BANNER_WINDOW_MS = 3500L;
@@ -28,6 +28,7 @@ final class Chrome152DownloadHooks {
     private static final long INSTALL_DEDUP_MS = 90_000L;
     private static final long INSTALL_WAIT_MS = 20_000L;
     private static final long INSTALL_POLL_MS = 500L;
+    private static final long COMPLETION_SETTLE_MS = 750L;
 
     private final ClassLoader loader;
     private final HookSupport hooks;
@@ -94,11 +95,10 @@ final class Chrome152DownloadHooks {
                             || !(chain.getArg(3) instanceof Number)) return chain.proceed();
                     try {
                         long ptr = nativePtr(chain.getThisObject());
-                        long callback = ((Number) chain.getArg(3)).longValue();
                         if (ptr == 0L) return chain.proceed();
-                        nativeCall("VJJZ",
-                                new Class<?>[]{int.class, long.class, long.class, boolean.class},
-                                Chrome152.INSECURE_ACCEPT, ptr, callback, true);
+                        nativeCall("VJJZ", new Class<?>[]{int.class, long.class, long.class, boolean.class},
+                                Chrome152.INSECURE_ACCEPT, ptr,
+                                ((Number) chain.getArg(3)).longValue(), true);
                         hooks.info("Chrome 152 insecure download confirmed automatically");
                         return null;
                     } catch (Throwable t) {
@@ -119,8 +119,7 @@ final class Chrome152DownloadHooks {
                     try {
                         long ptr = nativePtr(chain.getThisObject());
                         if (ptr == 0L) return chain.proceed();
-                        nativeCall("VJJZ",
-                                new Class<?>[]{int.class, long.class, long.class, boolean.class},
+                        nativeCall("VJJZ", new Class<?>[]{int.class, long.class, long.class, boolean.class},
                                 Chrome152.DUPLICATE_ACCEPT, ptr, ((Number) last).longValue(), true);
                         hooks.info("Chrome 152 duplicate download confirmed automatically");
                         return null;
@@ -177,9 +176,7 @@ final class Chrome152DownloadHooks {
                     try {
                         long ptr = nativePtr(chain.getThisObject());
                         if (ptr == 0L) return chain.proceed();
-                        // Verified Chrome 152 signature: J.N.VJOZ(int,long,String,boolean).
-                        nativeCall("VJOZ",
-                                new Class<?>[]{int.class, long.class, String.class, boolean.class},
+                        nativeCall("VJOZ", new Class<?>[]{int.class, long.class, String.class, boolean.class},
                                 Chrome152.OPEN_ACCEPT, ptr, path, true);
                         hooks.info("Chrome 152 open-file confirmation accepted automatically");
                         return null;
@@ -193,8 +190,10 @@ final class Chrome152DownloadHooks {
     private void installCompletion() {
         hooks.all(loader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
                 "chromex152:download:completed", chain -> {
-                    handleCompletion(findDownloadInfo(chain.getArgs().toArray()));
-                    return chain.proceed();
+                    Object info = findDownloadInfo(chain.getArgs().toArray());
+                    Object result = chain.proceed();
+                    if (info != null) main.postDelayed(() -> handleCompletion(info), COMPLETION_SETTLE_MS);
+                    return result;
                 });
 
         hooks.all(loader, Chrome145.DOWNLOAD_UTILS, "openDownload",
@@ -202,28 +201,35 @@ final class Chrome152DownloadHooks {
                     if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return chain.proceed();
                     Object[] args = chain.getArgs().toArray();
                     if (args.length < 2) return chain.proceed();
-                    String path = asString(args[0]);
-                    String mime = asString(args[1]);
-                    String name = asString(args[args.length - 1]);
+                    String path = string(args[0]);
+                    String mime = string(args[1]);
+                    String name = string(args[args.length - 1]);
+                    String logical = DownloadNormalizationRegistry.logicalPath(path);
+                    if (logical != null) {
+                        path = logical;
+                        name = new File(logical).getName();
+                    }
                     if (!isApk(mime, name != null ? name : path)) return chain.proceed();
                     String fileName = normalizedName(name, path);
                     InstallerUriResolver.Result resolved = InstallerUriResolver.resolve(
                             chromeContext(), loader, path, fileName);
-                    if (resolved.uri != null) {
-                        if (launchInstallerNow(resolved.uri, fileName)) return null;
-                    } else if (resolved.terminal) {
-                        hooks.warn("Chrome 152 APK open blocked safely: " + resolved.detail);
-                    }
+                    if (resolved.uri != null && launchInstallerNow(resolved.uri, fileName)) return null;
+                    if (resolved.terminal) hooks.warn("Chrome 152 APK open blocked safely: " + resolved.detail);
                     return chain.proceed();
                 });
     }
 
     private void handleCompletion(Object info) {
-        if (info == null) return;
         try {
             String mime = stringField(info, Chrome152.DOWNLOAD_INFO_MIME);
             String name = stringField(info, Chrome152.DOWNLOAD_INFO_NAME);
             String path = stringField(info, Chrome152.DOWNLOAD_INFO_PATH);
+            String logical = DownloadNormalizationRegistry.logicalPath(path);
+            if (logical != null) {
+                path = logical;
+                name = new File(logical).getName();
+            }
+
             boolean apk = isApk(mime, name != null ? name : path);
             boolean replaceBanner = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
                     || (apk && Config.get(prefs, Config.APK_TOAST));
@@ -242,8 +248,8 @@ final class Chrome152DownloadHooks {
         for (String method : new String[]{"a", "d"}) {
             hooks.all(loader, Chrome152.DOWNLOAD_MESSAGE, method,
                     "chromex152:banner:message-" + method, chain -> {
-                        long now = System.currentTimeMillis();
-                        if (suppressBannerUntil.get() >= now && takeSuppressionBudget()) return null;
+                        if (suppressBannerUntil.get() >= System.currentTimeMillis()
+                                && takeSuppressionBudget()) return null;
                         return chain.proceed();
                     });
         }
@@ -277,21 +283,23 @@ final class Chrome152DownloadHooks {
             long deadline = System.currentTimeMillis() + INSTALL_WAIT_MS;
             while (System.currentTimeMillis() < deadline) {
                 if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return;
+                String logical = DownloadNormalizationRegistry.logicalPath(path);
+                String candidatePath = logical == null ? path : logical;
+                String candidateName = logical == null ? fileName : new File(logical).getName();
                 InstallerUriResolver.Result resolved = InstallerUriResolver.resolve(
-                        chromeContext(), loader, path, fileName);
+                        chromeContext(), loader, candidatePath, candidateName);
                 if (resolved.uri != null) {
                     Uri uri = resolved.uri;
-                    main.post(() -> launchInstallerNow(uri, fileName));
+                    main.post(() -> launchInstallerNow(uri, candidateName));
                     return;
                 }
                 if (resolved.terminal) {
-                    hooks.warn("Chrome 152 APK installer stopped: " + fileName
+                    hooks.warn("Chrome 152 APK installer stopped: " + candidateName
                             + " :: " + resolved.detail);
                     return;
                 }
-                try {
-                    Thread.sleep(INSTALL_POLL_MS);
-                } catch (InterruptedException e) {
+                try { Thread.sleep(INSTALL_POLL_MS); }
+                catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
                 }
@@ -302,8 +310,7 @@ final class Chrome152DownloadHooks {
 
     private boolean launchInstallerNow(Uri uri, String key) {
         if (!InstallerUriResolver.isContent(uri)) {
-            hooks.warn("Chrome 152 refused non-content installer URI: "
-                    + (uri == null ? "null" : uri.getScheme()));
+            hooks.warn("Chrome 152 refused non-content installer URI");
             return false;
         }
         long now = System.currentTimeMillis();
@@ -328,6 +335,20 @@ final class Chrome152DownloadHooks {
             hooks.error("Chrome 152 launch APK installer", t);
             return false;
         }
+    }
+
+    private void showToastOnce(String name) {
+        long now = System.currentTimeMillis();
+        String safe = name == null || name.isBlank() ? "下载文件" : name;
+        if (safe.equals(lastToastName.get()) && now - lastToastAt.get() < TOAST_DEDUP_MS) return;
+        lastToastName.set(safe);
+        lastToastAt.set(now);
+        Context context = chromeContext();
+        if (context == null) return;
+        main.post(() -> {
+            try { Toast.makeText(context, "下载完成: " + safe, Toast.LENGTH_SHORT).show(); }
+            catch (Throwable t) { hooks.error("Chrome 152 download Toast", t); }
+        });
     }
 
     private Object findDownloadInfo(Object[] args) {
@@ -369,20 +390,6 @@ final class Chrome152DownloadHooks {
         return method.invoke(null, args);
     }
 
-    private void showToastOnce(String name) {
-        long now = System.currentTimeMillis();
-        String safe = name == null || name.isBlank() ? "下载文件" : name;
-        if (safe.equals(lastToastName.get()) && now - lastToastAt.get() < TOAST_DEDUP_MS) return;
-        lastToastName.set(safe);
-        lastToastAt.set(now);
-        Context context = chromeContext();
-        if (context == null) return;
-        main.post(() -> {
-            try { Toast.makeText(context, "下载完成: " + safe, Toast.LENGTH_SHORT).show(); }
-            catch (Throwable t) { hooks.error("Chrome 152 download Toast", t); }
-        });
-    }
-
     private Context chromeContext() {
         try {
             Class<?> thread = Class.forName("android.app.ActivityThread");
@@ -391,39 +398,37 @@ final class Chrome152DownloadHooks {
         } catch (Throwable ignored) { return null; }
     }
 
-    private static boolean isApk(String mime, String name) {
-        if (mime != null && mime.toLowerCase(Locale.ROOT).contains("package-archive")) return true;
-        return name != null && name.toLowerCase(Locale.ROOT).endsWith(".apk");
-    }
-
-    private static String normalizedName(String name, String path) {
-        String value = name == null || name.isBlank() ? path : name;
-        if (value == null || value.isBlank()) return null;
-        if (value.startsWith("content://")) return DownloadNamePolicy.fileNameOnly(value);
-        try { return new File(value).getName(); }
-        catch (Throwable ignored) { return value; }
-    }
-
-    private static String fileName(String path, String fallback) {
-        String name = DownloadNamePolicy.fileNameOnly(path);
-        if (name == null || name.isBlank()) name = DownloadNamePolicy.fileNameOnly(fallback);
-        return name == null || name.isBlank() ? "下载文件" : name;
-    }
-
-    private static String stringField(Object owner, String name) {
+    private static String stringField(Object object, String field) {
+        if (object == null) return null;
         try {
-            Object value = Reflect.get(owner, name);
+            Object value = Reflect.get(object, field);
             return value instanceof String ? (String) value : null;
         } catch (Throwable ignored) { return null; }
     }
 
-    private static String asString(Object value) {
+    private static String string(Object value) {
         return value instanceof String ? (String) value : null;
     }
 
     private static String lastString(Object[] args) {
         for (int i = args.length - 1; i >= 0; i--) if (args[i] instanceof String) return (String) args[i];
         return null;
+    }
+
+    private static boolean isApk(String mime, String name) {
+        if (mime != null && mime.toLowerCase(Locale.ROOT).contains("package-archive")) return true;
+        return name != null && name.toLowerCase(Locale.ROOT).endsWith(".apk");
+    }
+
+    private static String normalizedName(String name, String path) {
+        if (name != null && !name.isBlank()) return new File(name).getName();
+        if (path != null && !path.isBlank()) return new File(path).getName();
+        return null;
+    }
+
+    private static String fileName(String path, String name) {
+        String result = normalizedName(name, path);
+        return result == null ? "下载文件" : result;
     }
 
     private static final class InstallStamp {
