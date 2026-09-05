@@ -64,6 +64,10 @@ public final class ModuleMain extends XposedModule {
 
         installFeature("same-name download overwrite", () -> {
             if (profile.isAdaptive()) {
+                // Install the UI capture first so DuplicateDownloadDialogBridge#showDialog is
+                // observed before the overwrite hook consumes the dialog without proceeding to
+                // Chromium's original implementation.
+                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
                 new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
             } else {
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install();
@@ -72,7 +76,6 @@ public final class ModuleMain extends XposedModule {
         installFeature("download history rewrite", () -> {
             if (profile.isAdaptive()) {
                 new AdaptiveDownloadHistoryCompat(runtime, hooks, prefs).install();
-                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
             } else {
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install();
             }
