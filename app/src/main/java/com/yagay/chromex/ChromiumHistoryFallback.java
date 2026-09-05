@@ -20,7 +20,7 @@ final class ChromiumHistoryFallback {
     }
 
     boolean clear(Activity activity, String reason) {
-        if (profile == null) return false;
+        if (profile == null || profile.isAdaptive()) return false;
         if (profile.is152()) {
             return chrome152 != null && chrome152.clear(activity, reason);
         }
