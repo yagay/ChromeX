@@ -46,7 +46,7 @@ final class LiteExtensionRuntime {
                     hooks.method(method, id, chain -> {
                         Object result = chain.proceed();
                         Object tab = chain.getThisObject();
-                        String url = findUrl(tab, chain.getArgs());
+                        String url = findUrl(tab, chain.getArgs().toArray());
                         if (tab != null && url != null) {
                             MAIN.postDelayed(() -> inject(tab, url, hooks), 80L);
                         }
