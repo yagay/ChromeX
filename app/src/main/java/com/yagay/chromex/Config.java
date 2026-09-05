@@ -37,8 +37,8 @@ public final class Config {
     public static boolean get(SharedPreferences prefs, String key) {
         if (prefs == null) return defaultValue(key);
         try {
-            // Overwrite owns the duplicate-conflict decision. When enabled, suppress the older
-            // "accept duplicate" hook so it cannot race ahead and let Chromium uniquify to (1).
+            // Overwrite owns duplicate-conflict confirmation when enabled. Suppress the ordinary
+            // duplicate bypass so two interceptors cannot race on the same native callback.
             if (BYPASS_DUPLICATE.equals(key)
                     && prefs.getBoolean(OVERWRITE_DUPLICATE, defaultValue(OVERWRITE_DUPLICATE))) {
                 return false;
@@ -49,12 +49,25 @@ public final class Config {
         }
     }
 
+    static boolean stored(SharedPreferences prefs, String key) {
+        if (prefs == null) return defaultValue(key);
+        try { return prefs.getBoolean(key, defaultValue(key)); }
+        catch (Throwable ignored) { return defaultValue(key); }
+    }
+
     public static boolean defaultValue(String key) {
-        // Destructive overwrite is opt-in. Deep diagnostic scans and all-download Toast are also
-        // opt-in; the remaining convenience features keep their historical enabled defaults.
-        if (DIAGNOSTIC_MODE.equals(key)
+        // Safety-sensitive actions are explicit opt-in on a fresh install. Existing user choices
+        // remain untouched because SharedPreferences values always override these defaults.
+        if (BYPASS_DANGEROUS.equals(key)
+                || BYPASS_INSECURE.equals(key)
+                || BYPASS_POLICY.equals(key)
+                || BYPASS_OPEN.equals(key)
+                || AUTO_INSTALL_APK.equals(key)
+                || DIAGNOSTIC_MODE.equals(key)
                 || ALL_DOWNLOAD_TOAST.equals(key)
-                || OVERWRITE_DUPLICATE.equals(key)) return false;
+                || OVERWRITE_DUPLICATE.equals(key)) {
+            return false;
+        }
         return true;
     }
 }
