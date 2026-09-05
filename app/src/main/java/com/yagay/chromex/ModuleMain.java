@@ -50,6 +50,8 @@ public final class ModuleMain extends XposedModule {
 
         installFeature("same-name download overwrite", () ->
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install());
+        installFeature("download history rewrite", () ->
+                new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install());
 
         if (Chrome152.matches(runtime)) {
             hooks.info("verified exact-build profile selected: " + runtime.versionName);
