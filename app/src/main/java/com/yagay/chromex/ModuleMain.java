@@ -73,6 +73,7 @@ public final class ModuleMain extends XposedModule {
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install());
         installFeature("Chromium tabs/homepage", () -> {
             if (profile.isAdaptive()) {
+                new AdaptiveHomepageValueHooks(runtime, hooks, prefs).install();
                 new AdaptiveChromiumTabsHooks(profile, runtime, hooks, prefs).install();
                 new AdaptiveForkTabCompat(profile, runtime, hooks, prefs).install();
             } else {
