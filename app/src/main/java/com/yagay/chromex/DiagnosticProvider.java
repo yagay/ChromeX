@@ -5,22 +5,26 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Process;
 
 /**
- * Receives diagnostic data from the hooked Chrome process and stores it in ChromeX's own UID.
- * RemotePreferences remain read-only inside hooked applications; they are never used as a log sink.
+ * Cross-UID transport owned by ChromeX. It receives diagnostics from Chrome and also stores small
+ * resolver-cache records so future Chrome builds only need a DexKit scan once per installed build.
  */
 public final class DiagnosticProvider extends ContentProvider {
     static final String AUTHORITY = "com.yagay.chromex.diagnostics";
     static final Uri URI = Uri.parse("content://" + AUTHORITY + "/write");
+    static final Uri CACHE_URI = Uri.parse("content://" + AUTHORITY + "/cache");
     static final String STORE_FILE = "chromex_diagnostics";
 
     static final String COL_KIND = "kind";
     static final String COL_TEXT = "text";
     static final String COL_TIME = "time";
+    static final String COL_KEY = "key";
+    static final String COL_VALUE = "value";
 
     static final String KIND_SESSION = "session";
     static final String KIND_HOOK = "hook";
@@ -28,6 +32,7 @@ public final class DiagnosticProvider extends ContentProvider {
     static final String KIND_EVENTS = "events";
     static final String KIND_SCAN = "scan";
 
+    private static final String CACHE_PREFIX = "resolver:";
     private static final int MAX_SESSION_CHARS = 24_000;
     private static final int MAX_HOOK_CHARS = 120_000;
     private static final Object LOCK = new Object();
@@ -44,18 +49,28 @@ public final class DiagnosticProvider extends ContentProvider {
     static void clearStore(Context context) {
         if (context == null) return;
         synchronized (LOCK) {
-            store(context).edit().clear().commit();
+            SharedPreferences prefs = store(context);
+            SharedPreferences.Editor editor = prefs.edit();
+            // Keep resolver cache across diagnostic rescans; only diagnostic keys are reset.
+            editor.remove(Diagnostics.KEY_SESSION)
+                    .remove(Diagnostics.KEY_SCAN_REPORT)
+                    .remove(Diagnostics.KEY_HOOK_REPORT)
+                    .remove(Diagnostics.KEY_HIT_REPORT)
+                    .remove(Diagnostics.KEY_EVENT_REPORT)
+                    .remove(Diagnostics.KEY_LAST_SCAN)
+                    .commit();
         }
     }
 
     @Override
     public Uri insert(Uri uri, ContentValues values) {
         if (!callerAllowed()) {
-            throw new SecurityException("ChromeX diagnostics accepts only Chrome or ChromeX callers");
+            throw new SecurityException("ChromeX provider accepts only Chrome or ChromeX callers");
         }
         if (values == null) return null;
         Context context = getContext();
         if (context == null) return null;
+        if (isCacheUri(uri)) return putCache(context, values);
 
         String kind = values.getAsString(COL_KIND);
         String text = values.getAsString(COL_TEXT);
@@ -68,8 +83,6 @@ public final class DiagnosticProvider extends ContentProvider {
         synchronized (LOCK) {
             switch (kind) {
                 case KIND_SESSION:
-                    // Chrome has several processes. Never clear here, otherwise a late subprocess
-                    // can erase hook-install data already written by the browser process.
                     append(prefs, Diagnostics.KEY_SESSION, text, MAX_SESSION_CHARS);
                     break;
                 case KIND_HOOK:
@@ -92,6 +105,38 @@ public final class DiagnosticProvider extends ContentProvider {
             }
         }
         return Uri.withAppendedPath(URI, Long.toString(time));
+    }
+
+    private Uri putCache(Context context, ContentValues values) {
+        String key = values.getAsString(COL_KEY);
+        String value = values.getAsString(COL_VALUE);
+        if (key == null || key.isBlank() || value == null) return null;
+        synchronized (LOCK) {
+            store(context).edit().putString(CACHE_PREFIX + key, value).commit();
+        }
+        return Uri.withAppendedPath(CACHE_URI, key);
+    }
+
+    @Override
+    public Cursor query(Uri uri, String[] projection, String selection,
+                        String[] selectionArgs, String sortOrder) {
+        if (!callerAllowed()) {
+            throw new SecurityException("ChromeX provider accepts only Chrome or ChromeX callers");
+        }
+        if (!isCacheUri(uri)) return null;
+        Context context = getContext();
+        if (context == null) return null;
+        String key = uri == null ? null : uri.getLastPathSegment();
+        if (key == null || "cache".equals(key)) return null;
+        String value = store(context).getString(CACHE_PREFIX + key, null);
+        MatrixCursor cursor = new MatrixCursor(new String[]{COL_KEY, COL_VALUE}, 1);
+        if (value != null) cursor.addRow(new Object[]{key, value});
+        return cursor;
+    }
+
+    private static boolean isCacheUri(Uri uri) {
+        return uri != null && !uri.getPathSegments().isEmpty()
+                && "cache".equals(uri.getPathSegments().get(0));
     }
 
     private static void append(SharedPreferences prefs, String key, String line, int maxChars) {
@@ -119,14 +164,10 @@ public final class DiagnosticProvider extends ContentProvider {
     }
 
     @Override
-    public Cursor query(Uri uri, String[] projection, String selection,
-                        String[] selectionArgs, String sortOrder) {
-        return null;
-    }
-
-    @Override
     public String getType(Uri uri) {
-        return "vnd.android.cursor.item/vnd.chromex.diagnostic";
+        return isCacheUri(uri)
+                ? "vnd.android.cursor.item/vnd.chromex.resolver"
+                : "vnd.android.cursor.item/vnd.chromex.diagnostic";
     }
 
     @Override
