@@ -1,11 +1,8 @@
 package com.yagay.chromex;
 
-import java.io.FileInputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.luckypray.dexkit.DexKitBridge;
@@ -16,7 +13,6 @@ import org.luckypray.dexkit.result.MethodData;
 /** DexKit-backed structural resolver for unknown Chromium and vendor forks. */
 final class AdaptiveDexResolver {
     private static final String CACHE_ENGINE = "adaptive:engine-version";
-    private static final String CACHE_ENGINE_LITERAL = "adaptive:engine-literal";
     private static final String CACHE_HOMEPAGE = "adaptive:homepage";
     private static final String CACHE_NATIVE_PREFIX = "adaptive:native:";
     private static final Pattern ENGINE_VERSION = Pattern.compile("\\d{2,3}\\.\\d+\\.\\d+\\.\\d+");
@@ -28,13 +24,7 @@ final class AdaptiveDexResolver {
 
     static String resolveProductVersion(ChromeRuntime runtime, HookSupport hooks) {
         if (runtime == null) return "unknown";
-        if (isPlausibleEngineVersion(runtime.versionName)) return runtime.versionName;
-
-        String cachedLiteral = ResolverCacheClient.get(runtime, CACHE_ENGINE_LITERAL);
-        if (isPlausibleEngineVersion(cachedLiteral)) {
-            hooks.info("adaptive resolver cache hit: Chromium engine=" + cachedLiteral);
-            return cachedLiteral;
-        }
+        if (plausibleEngineVersion(runtime.versionName)) return runtime.versionName;
 
         Method method = memory(runtime, CACHE_ENGINE);
         if (method == null) {
@@ -59,19 +49,13 @@ final class AdaptiveDexResolver {
             remember(runtime, CACHE_ENGINE, method);
             ResolverCacheClient.put(runtime, CACHE_ENGINE, encode(method));
             String value = invokeStringNoArg(method);
-            if (isPlausibleEngineVersion(value)) {
-                ResolverCacheClient.put(runtime, CACHE_ENGINE_LITERAL, value);
+            if (plausibleEngineVersion(value)) {
                 hooks.info("adaptive resolver: Chromium engine=" + value + " via "
                         + method.getDeclaringClass().getName() + "#" + method.getName());
                 return value;
             }
         }
-
-        String literal = scanEngineVersionLiteral(runtime, hooks);
-        if (literal != null) {
-            ResolverCacheClient.put(runtime, CACHE_ENGINE_LITERAL, literal);
-            return literal;
-        }
+        // ChromiumProfile applies an APK/Dex literal fallback if this semantic method is absent.
         return runtime.versionName == null ? "unknown" : runtime.versionName;
     }
 
@@ -103,7 +87,6 @@ final class AdaptiveDexResolver {
             } catch (Throwable ignored) {}
         }
 
-        // Newer Chromium builds can obfuscate the method name while retaining the NTP constant.
         if (method == null) {
             try (DexKitBridge bridge = DexKitBridge.create(runtime.chromeSplitPath)) {
                 MethodData data = bridge.findMethod(FindMethod.create()
@@ -116,13 +99,12 @@ final class AdaptiveDexResolver {
                 if (method == null) {
                     Class<?> owner = candidate.getDeclaringClass();
                     for (Method declared : owner.getDeclaredMethods()) {
-                        if (isHomepageGetter(declared)) {
-                            if (method != null) {
-                                method = null;
-                                break;
-                            }
-                            method = declared;
+                        if (!isHomepageGetter(declared)) continue;
+                        if (method != null) {
+                            method = null;
+                            break;
                         }
+                        method = declared;
                     }
                 }
             } catch (Throwable ignored) {}
@@ -187,53 +169,17 @@ final class AdaptiveDexResolver {
         catch (Throwable ignored) { return null; }
     }
 
-    private static String scanEngineVersionLiteral(ChromeRuntime runtime, HookSupport hooks) {
-        if (runtime == null || runtime.chromeSplitPath == null) return null;
-        try (FileInputStream in = new FileInputStream(runtime.chromeSplitPath)) {
-            String dexText = new String(in.readAllBytes(), StandardCharsets.ISO_8859_1);
-            Matcher matcher = ENGINE_VERSION.matcher(dexText);
-            String best = null;
-            while (matcher.find()) {
-                String candidate = matcher.group();
-                if (!isPlausibleEngineVersion(candidate)) continue;
-                if (best == null || compareVersion(candidate, best) > 0) best = candidate;
-            }
-            if (best != null) {
-                hooks.info("adaptive resolver: Chromium engine=" + best
-                        + " via split dex version literal");
-            }
-            return best;
-        } catch (Throwable t) {
-            hooks.warn("adaptive resolver: split dex version scan failed: "
-                    + t.getClass().getSimpleName());
-            return null;
-        }
-    }
-
-    private static boolean isPlausibleEngineVersion(String value) {
+    private static boolean plausibleEngineVersion(String value) {
         if (value == null || !ENGINE_VERSION.matcher(value).matches()) return false;
-        String[] parts = value.split("\\.");
-        if (parts.length != 4) return false;
+        String[] p = value.split("\\.");
+        if (p.length != 4) return false;
         try {
-            int major = Integer.parseInt(parts[0]);
-            int build = Integer.parseInt(parts[2]);
+            int major = Integer.parseInt(p[0]);
+            int build = Integer.parseInt(p[2]);
             return major >= 60 && major <= 250 && build >= 1000;
         } catch (Throwable ignored) {
             return false;
         }
-    }
-
-    private static int compareVersion(String left, String right) {
-        String[] a = left.split("\\.");
-        String[] b = right.split("\\.");
-        for (int i = 0; i < Math.min(a.length, b.length); i++) {
-            try {
-                int av = Integer.parseInt(a[i]);
-                int bv = Integer.parseInt(b[i]);
-                if (av != bv) return Integer.compare(av, bv);
-            } catch (Throwable ignored) {}
-        }
-        return Integer.compare(a.length, b.length);
     }
 
     private static Method restoreHomepage(ChromeRuntime runtime, String encoded) {
