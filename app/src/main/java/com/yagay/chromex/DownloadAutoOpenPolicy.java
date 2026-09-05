@@ -35,32 +35,19 @@ final class DownloadAutoOpenPolicy {
     }
 
     private static String classifyKey(String mime, String ext) {
-        // Extension is checked first because Chromium/servers frequently report generic
-        // application/octet-stream for downloaded files.
-        if (is(ext, "apk") || contains(mime, "package-archive")) {
-            return Config.AUTO_OPEN_APK;
-        }
-        if (isAny(ext, "apks", "apkm", "xapk")) {
-            return Config.AUTO_OPEN_APP_BUNDLE;
-        }
-        if (is(ext, "pdf") || "application/pdf".equals(mime)) {
-            return Config.AUTO_OPEN_PDF;
-        }
+        // Explicit extension wins over MIME because Chromium/servers frequently report generic or
+        // even incorrect MIME types for downloaded files. In particular, bundle formats must not
+        // be sent to the platform APK installer just because a server labels them package-archive.
+        if (is(ext, "apk")) return Config.AUTO_OPEN_APK;
+        if (isAny(ext, "apks", "apkm", "xapk")) return Config.AUTO_OPEN_APP_BUNDLE;
+        if (is(ext, "pdf")) return Config.AUTO_OPEN_PDF;
         if (isAny(ext, "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "cab")) {
             return Config.AUTO_OPEN_ARCHIVE;
         }
-        if (isAny(ext, "doc", "docx", "odt", "rtf")) {
-            return Config.AUTO_OPEN_DOCUMENT;
-        }
-        if (isAny(ext, "xls", "xlsx", "ods", "csv")) {
-            return Config.AUTO_OPEN_SPREADSHEET;
-        }
-        if (isAny(ext, "ppt", "pptx", "odp")) {
-            return Config.AUTO_OPEN_PRESENTATION;
-        }
-        if (isAny(ext, "epub", "mobi", "azw", "azw3", "fb2")) {
-            return Config.AUTO_OPEN_EBOOK;
-        }
+        if (isAny(ext, "doc", "docx", "odt", "rtf")) return Config.AUTO_OPEN_DOCUMENT;
+        if (isAny(ext, "xls", "xlsx", "ods", "csv")) return Config.AUTO_OPEN_SPREADSHEET;
+        if (isAny(ext, "ppt", "pptx", "odp")) return Config.AUTO_OPEN_PRESENTATION;
+        if (isAny(ext, "epub", "mobi", "azw", "azw3", "fb2")) return Config.AUTO_OPEN_EBOOK;
         if (isAny(ext, "txt", "md", "markdown", "json", "xml", "yaml", "yml", "log", "ini", "conf", "cfg")) {
             return Config.AUTO_OPEN_TEXT;
         }
@@ -73,6 +60,10 @@ final class DownloadAutoOpenPolicy {
         if (isAny(ext, "mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "amr")) {
             return Config.AUTO_OPEN_AUDIO;
         }
+
+        // MIME becomes the fallback when no usable extension was available.
+        if (contains(mime, "package-archive")) return Config.AUTO_OPEN_APK;
+        if ("application/pdf".equals(mime)) return Config.AUTO_OPEN_PDF;
         if (mime.startsWith("image/")) return Config.AUTO_OPEN_IMAGE;
         if (mime.startsWith("video/")) return Config.AUTO_OPEN_VIDEO;
         if (mime.startsWith("audio/")) return Config.AUTO_OPEN_AUDIO;
@@ -95,9 +86,7 @@ final class DownloadAutoOpenPolicy {
     }
 
     private static String effectiveMime(String mime, String ext) {
-        if (Config.AUTO_OPEN_APK.equals(classifyKey(mime, ext))) {
-            return "application/vnd.android.package-archive";
-        }
+        if (is(ext, "apk")) return "application/vnd.android.package-archive";
         if (isAny(ext, "apks", "apkm", "xapk")) return "application/zip";
         if (is(ext, "pdf")) return "application/pdf";
         if (is(ext, "epub")) return "application/epub+zip";
@@ -113,6 +102,12 @@ final class DownloadAutoOpenPolicy {
                 if (mapped != null && !mapped.isBlank()) return mapped;
             } catch (Throwable ignored) {}
         }
+        String key = classifyKey(mime, ext);
+        if (Config.AUTO_OPEN_IMAGE.equals(key)) return "image/*";
+        if (Config.AUTO_OPEN_VIDEO.equals(key)) return "video/*";
+        if (Config.AUTO_OPEN_AUDIO.equals(key)) return "audio/*";
+        if (Config.AUTO_OPEN_TEXT.equals(key)) return "text/plain";
+        if (Config.AUTO_OPEN_ARCHIVE.equals(key)) return "application/zip";
         return "application/octet-stream";
     }
 
