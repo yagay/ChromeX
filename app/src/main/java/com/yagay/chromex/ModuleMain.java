@@ -79,8 +79,29 @@ public final class ModuleMain extends XposedModule {
         } catch (Throwable t) {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
+
+        scheduleExtensionCapabilityProbe(runtime.classLoader);
         hooks.info("Chromium capability runtime ready: package=" + targetPackage
                 + " engine=" + profile.engineVersion);
+    }
+
+    private void scheduleExtensionCapabilityProbe(ClassLoader classLoader) {
+        Thread worker = new Thread(() -> {
+            try {
+                ExtensionCapabilityReport report = ExtensionCapabilityDetector.detect(classLoader);
+                RuntimeDiagnostics.event("INFO", "Extension capability probe\n"
+                        + report.toDiagnosticText());
+                hooks.info("Extension runtime mode=" + report.mode
+                        + " java=" + report.javaHits.size()
+                        + " native=" + report.nativeHits.size());
+            } catch (Throwable t) {
+                RuntimeDiagnostics.event("WARN", "Extension capability probe failed :: "
+                        + t.getClass().getSimpleName() + ": " + t.getMessage());
+                log(Log.WARN, "ChromeX", "extension capability probe failed", t);
+            }
+        }, "ChromeX-ExtensionProbe");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        worker.start();
     }
 
     private void installFeature(String name, Runnable installer) {
