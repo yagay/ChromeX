@@ -59,8 +59,8 @@ public final class ModuleMain extends XposedModule {
                     new Chrome152DownloadHooks(loader, hooks, prefs).install());
             hooks.info("Chrome 152 consolidated profile active: " + runtime.versionName);
         } else if (VERIFIED_CHROME145.equals(runtime.versionName)) {
-            installFeature("Chrome 145 tab hooks", () ->
-                    new TabHooks(this, hooks, prefs, loader).install());
+            installFeature("Chrome 145 tabs/homepage", () ->
+                    new Chrome145TabsHooks(hooks, prefs, loader).install());
             installFeature("Chrome 145 download dialog hooks", () ->
                     new DownloadDialogHooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 145 installer hooks", () ->
@@ -75,8 +75,6 @@ public final class ModuleMain extends XposedModule {
                     new AdaptiveDownloadDialogs(runtime, hooks, prefs).install());
         }
 
-        // Deep locator is opt-in. Lightweight hook/session/hit/error telemetry is handled by
-        // RuntimeDiagnostics and stays available even when deep scanning is disabled.
         try {
             Diagnostics.scheduleScan(prefs, loader);
         } catch (Throwable t) {
