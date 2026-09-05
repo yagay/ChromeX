@@ -2,7 +2,7 @@ package com.yagay.chromex;
 
 import android.content.SharedPreferences;
 
-/** Shared verified download feature composed from capability-level modules. */
+/** Shared download feature composed from capability-level modules. */
 final class ChromiumDownloadHooks {
     private final ChromiumProfile profile;
     private final ChromeRuntime runtime;
@@ -18,7 +18,11 @@ final class ChromiumDownloadHooks {
     }
 
     void install() {
-        new ChromiumDownloadDialogs(profile, runtime.classLoader, hooks, prefs).install();
+        if (profile.isVerifiedExact()) {
+            new ChromiumDownloadDialogs(profile, runtime.classLoader, hooks, prefs).install();
+        } else {
+            new AdaptiveDownloadDialogs(runtime, hooks, prefs).install();
+        }
         new ChromiumDownloadCompletionHooks(profile, runtime, hooks, prefs).install();
     }
 }
