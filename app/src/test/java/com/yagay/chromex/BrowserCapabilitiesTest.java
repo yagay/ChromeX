@@ -21,4 +21,20 @@ public class BrowserCapabilitiesTest {
         assertEquals(BrowserCapabilities.Source.UNAVAILABLE,
                 capabilities.get(BrowserCapabilities.Key.TAB_CREATOR).source);
     }
+
+    @Test
+    public void conflictPolicyIsDerivedFromUniversalDownloadAnchors() {
+        BrowserCapabilities capabilities = BrowserCapabilities.builder()
+                .available(BrowserCapabilities.Key.DOWNLOAD_INFO,
+                        BrowserCapabilities.Source.STRUCTURAL, 94, "DownloadInfo")
+                .available(BrowserCapabilities.Key.DOWNLOAD_COMPLETION,
+                        BrowserCapabilities.Source.STABLE_API, 90, "completion")
+                .available(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT,
+                        BrowserCapabilities.Source.STABLE_API, 90, "duplicate")
+                .build();
+
+        assertTrue(capabilities.has(BrowserCapabilities.Key.DOWNLOAD_CONFLICT_POLICY, 90));
+        assertEquals(BrowserCapabilities.Source.STRUCTURAL,
+                capabilities.get(BrowserCapabilities.Key.DOWNLOAD_CONFLICT_POLICY).source);
+    }
 }
