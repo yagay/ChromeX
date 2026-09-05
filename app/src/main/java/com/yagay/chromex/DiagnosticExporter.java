@@ -55,9 +55,7 @@ final class DiagnosticExporter {
             this.detail = detail;
         }
 
-        boolean available() {
-            return su != null;
-        }
+        boolean available() { return su != null; }
     }
 
     static Result export(Context context, SharedPreferences settingsPrefs) {
@@ -67,7 +65,6 @@ final class DiagnosticExporter {
         try {
             SharedPreferences diagnosticPrefs = DiagnosticProvider.store(context);
             RootProbe root = probeRoot();
-
             ContentResolver resolver = context.getContentResolver();
             ContentValues values = new ContentValues();
             values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
@@ -80,54 +77,39 @@ final class DiagnosticExporter {
 
             try (OutputStream raw = resolver.openOutputStream(uri, "w");
                  ZipOutputStream zip = new ZipOutputStream(raw)) {
+                if (raw == null) throw new IllegalStateException("openOutputStream returned null");
                 add(zip, "README.txt",
-                        "ChromeX diagnostic package\n"
-                                + "Generated: " + now() + "\n\n"
-                                + "Diagnostic architecture:\n"
-                                + "- RemotePreferences are settings-only and read-only inside Chrome.\n"
-                                + "- Hook/session/hit/scan data are sent to ChromeX DiagnosticProvider.\n"
-                                + "- Diagnostic failures never block functional hooks.\n\n"
-                                + "Recommended reproduction flow:\n"
-                                + "1. Keep Diagnostic mode enabled.\n"
-                                + "2. Tap 'Re-scan hook points' or manually force-stop/reopen Chrome.\n"
-                                + "3. Reproduce every broken feature at least once.\n"
-                                + "4. Return to ChromeX and export this package.\n");
+                        "ChromeX diagnostic package\nGenerated: " + now() + "\n\n"
+                                + "- Lightweight hook/session/hit/error telemetry is always enabled.\n"
+                                + "- Deep class scanning is one-shot and auto-disables after completion.\n"
+                                + "- RemotePreferences are settings-only; Chrome sends telemetry to DiagnosticProvider.\n"
+                                + "- Resolver cache survives diagnostic rescans and is keyed by Chrome build.\n\n"
+                                + "Reproduction:\n1. Install the latest ChromeX build.\n"
+                                + "2. Reproduce each broken feature.\n"
+                                + "3. Use 'Re-scan hook points' only when symbol relocation is needed.\n"
+                                + "4. Export this package.\n");
                 add(zip, "device_and_packages.txt", deviceInfo(context, root));
                 add(zip, "root_status.txt", root.detail + "\n");
                 add(zip, "settings.txt", settings(settingsPrefs, diagnosticPrefs));
-                add(zip, "module_session.txt",
-                        prefString(diagnosticPrefs, Diagnostics.KEY_SESSION));
-                add(zip, "hook_points.txt",
-                        prefString(diagnosticPrefs, Diagnostics.KEY_SCAN_REPORT));
-                add(zip, "hook_install.txt",
-                        prefString(diagnosticPrefs, Diagnostics.KEY_HOOK_REPORT));
-                add(zip, "hook_hits.txt",
-                        prefString(diagnosticPrefs, Diagnostics.KEY_HIT_REPORT));
-                add(zip, "module_events.txt",
-                        prefString(diagnosticPrefs, Diagnostics.KEY_EVENT_REPORT));
+                add(zip, "module_session.txt", prefString(diagnosticPrefs, Diagnostics.KEY_SESSION));
+                add(zip, "hook_points.txt", prefString(diagnosticPrefs, Diagnostics.KEY_SCAN_REPORT));
+                add(zip, "hook_install.txt", prefString(diagnosticPrefs, Diagnostics.KEY_HOOK_REPORT));
+                add(zip, "hook_hits.txt", prefString(diagnosticPrefs, Diagnostics.KEY_HIT_REPORT));
+                add(zip, "module_events.txt", prefString(diagnosticPrefs, Diagnostics.KEY_EVENT_REPORT));
 
-                String logcat;
-                if (root.available()) {
-                    logcat = run(new String[]{root.su, "-c",
-                            "logcat -d -v threadtime -t 8000"}, 10);
-                } else {
-                    logcat = run(new String[]{"logcat", "-d", "-v", "threadtime", "-t", "1800"}, 8);
-                }
+                String logcat = root.available()
+                        ? run(new String[]{root.su, "-c", "logcat -d -v threadtime -t 8000"}, 10)
+                        : run(new String[]{"logcat", "-d", "-v", "threadtime", "-t", "1800"}, 8);
                 add(zip, "logcat_filtered.txt", filterRelevant(logcat));
 
-                String lspd;
-                if (root.available()) {
-                    lspd = run(new String[]{root.su, "-c",
-                            "for d in /data/adb/lspd/log /data/adb/lsposed/log; do "
-                                    + "[ -d \"$d\" ] || continue; "
-                                    + "for f in \"$d\"/* \"$d\"/*/* \"$d\"/*/*/*; do "
-                                    + "[ -f \"$f\" ] || continue; "
-                                    + "echo ===== $f =====; tail -n 1200 \"$f\" 2>/dev/null; "
-                                    + "done; done"}, 12);
-                } else {
-                    lspd = "Root unavailable. LSPosed private log directories could not be read.\n"
-                            + root.detail + "\n";
-                }
+                String lspd = root.available()
+                        ? run(new String[]{root.su, "-c",
+                        "for d in /data/adb/lspd/log /data/adb/lsposed/log; do "
+                                + "[ -d \"$d\" ] || continue; "
+                                + "for f in \"$d\"/* \"$d\"/*/* \"$d\"/*/*/*; do "
+                                + "[ -f \"$f\" ] || continue; echo ===== $f =====; "
+                                + "tail -n 1200 \"$f\" 2>/dev/null; done; done"}, 12)
+                        : "Root unavailable. LSPosed private logs could not be read.\n" + root.detail + "\n";
                 add(zip, "lsposed_filtered.txt", filterRelevant(lspd));
             }
 
@@ -137,9 +119,7 @@ final class DiagnosticExporter {
             return new Result(true, "已保存到 Download/ChromeX/" + name, uri);
         } catch (Throwable t) {
             if (uri != null) {
-                try {
-                    context.getContentResolver().delete(uri, null, null);
-                } catch (Throwable ignored) {}
+                try { context.getContentResolver().delete(uri, null, null); } catch (Throwable ignored) {}
             }
             return new Result(false,
                     "导出失败: " + t.getClass().getSimpleName() + ": " + t.getMessage(), null);
@@ -157,9 +137,7 @@ final class DiagnosticExporter {
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             context.startActivity(launch);
             return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
+        } catch (Throwable ignored) { return false; }
     }
 
     static String rootStatus() {
@@ -215,13 +193,14 @@ final class DiagnosticExporter {
         String[] keys = {
                 Config.CLEAN_START, Config.NEWTAB_HOME, Config.CLEAR_CLOSED_TABS,
                 Config.BYPASS_DANGEROUS, Config.BYPASS_INSECURE, Config.BYPASS_DUPLICATE,
-                Config.BYPASS_POLICY, Config.BYPASS_LOCATION, Config.BYPASS_OPEN,
-                Config.AUTO_INSTALL_APK, Config.APK_TOAST, Config.ALL_DOWNLOAD_TOAST,
-                Config.HIDE_TRANSLATE, Config.DIAGNOSTIC_MODE
+                Config.OVERWRITE_DUPLICATE, Config.BYPASS_POLICY, Config.BYPASS_LOCATION,
+                Config.BYPASS_OPEN, Config.AUTO_INSTALL_APK, Config.APK_TOAST,
+                Config.ALL_DOWNLOAD_TOAST, Config.HIDE_TRANSLATE, Config.DIAGNOSTIC_MODE
         };
         StringBuilder out = new StringBuilder();
         for (String key : keys) {
-            out.append(key).append('=').append(Config.get(settingsPrefs, key)).append('\n');
+            out.append(key).append("_stored=").append(Config.stored(settingsPrefs, key)).append('\n');
+            out.append(key).append("_effective=").append(Config.get(settingsPrefs, key)).append('\n');
         }
         try {
             out.append("last_scan_ms=")
@@ -254,38 +233,22 @@ final class DiagnosticExporter {
                     byte[] buffer = new byte[8192];
                     int total = 0;
                     while (total < COMMAND_LIMIT) {
-                        int n = input.read(buffer, 0,
-                                Math.min(buffer.length, COMMAND_LIMIT - total));
+                        int n = input.read(buffer, 0, Math.min(buffer.length, COMMAND_LIMIT - total));
                         if (n < 0) break;
-                        synchronized (out) {
-                            out.write(buffer, 0, n);
-                        }
+                        synchronized (out) { out.write(buffer, 0, n); }
                         total += n;
                     }
                 } catch (Throwable ignored) {}
             }, "ChromeX-command-reader");
             reader.setDaemon(true);
             reader.start();
-
-            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-            }
-            try {
-                reader.join(1200L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            synchronized (out) {
-                return out.toString(StandardCharsets.UTF_8);
-            }
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) process.destroyForcibly();
+            try { reader.join(1200L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            synchronized (out) { return out.toString(StandardCharsets.UTF_8); }
         } catch (Throwable t) {
             return "COMMAND_ERROR: " + t.getClass().getSimpleName() + ": " + t.getMessage();
         } finally {
-            if (process != null) {
-                try {
-                    process.destroy();
-                } catch (Throwable ignored) {}
-            }
+            if (process != null) try { process.destroy(); } catch (Throwable ignored) {}
         }
     }
 
@@ -293,24 +256,17 @@ final class DiagnosticExporter {
         if (raw == null || raw.isBlank()) return "No log data available.\n";
         StringBuilder out = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                new ByteArrayInputStream(raw.getBytes(StandardCharsets.UTF_8)),
-                StandardCharsets.UTF_8))) {
+                new ByteArrayInputStream(raw.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String low = line.toLowerCase(Locale.ROOT);
-                if (low.contains("chromex")
-                        || low.contains("chromexdiag")
-                        || low.contains("com.yagay.chromex")
-                        || low.contains("com.android.chrome")
-                        || low.contains("chromium")
-                        || low.contains("lsposed")
-                        || low.contains("libxposed")
-                        || low.contains("xposed")
-                        || low.contains("nosuchmethod")
-                        || low.contains("classnotfound")
-                        || low.contains("downloadcontroller")
-                        || low.contains("downloadmanagerservice")
-                        || low.contains("fatal exception")) {
+                if (low.contains("chromex") || low.contains("chromexdiag")
+                        || low.contains("com.yagay.chromex") || low.contains("com.android.chrome")
+                        || low.contains("chromium") || low.contains("lsposed")
+                        || low.contains("libxposed") || low.contains("xposed")
+                        || low.contains("nosuchmethod") || low.contains("classnotfound")
+                        || low.contains("fileuriexposed") || low.contains("downloadcontroller")
+                        || low.contains("downloadmanagerservice") || low.contains("fatal exception")) {
                     out.append(line).append('\n');
                     if (out.length() >= 2_500_000) {
                         out.append("... filtered log truncated ...\n");
@@ -336,10 +292,8 @@ final class DiagnosticExporter {
     }
 
     private static void add(ZipOutputStream zip, String name, String content) throws Exception {
-        ZipEntry entry = new ZipEntry(name);
-        zip.putNextEntry(entry);
-        byte[] data = (content == null ? "" : content).getBytes(StandardCharsets.UTF_8);
-        zip.write(data);
+        zip.putNextEntry(new ZipEntry(name));
+        zip.write((content == null ? "" : content).getBytes(StandardCharsets.UTF_8));
         zip.closeEntry();
     }
 
