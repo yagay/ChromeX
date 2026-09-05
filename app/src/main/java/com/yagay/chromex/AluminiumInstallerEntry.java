@@ -41,7 +41,8 @@ final class AluminiumInstallerEntry {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView desc = new TextView(activity);
-        desc.setText("从 ChromeX 仓库读取远程 stable 通道，下载并校验匹配的 Chrome + Trichrome，再使用 Root 覆盖/降级安装。以后更新 Release 与 channel.json 即可，无需更新 ChromeX。");
+        desc.setText("支持官方 Chromium Desktop Android 扩展插件功能。\n"
+                + "从 ChromeX 仓库读取远程 stable 通道，下载并校验匹配的 Chrome + Trichrome，再使用 Root 覆盖/降级安装。以后更新 Release 与 channel.json 即可，无需更新 ChromeX。");
         desc.setTextSize(14f);
         desc.setPadding(0, dp(activity, 4), 0, dp(activity, 6));
         section.addView(desc, new LinearLayout.LayoutParams(
