@@ -2,7 +2,7 @@ package com.yagay.chromex;
 
 import android.content.SharedPreferences;
 
-/** Shared download feature composed from capability-level modules. */
+/** Download feature composed entirely from universal semantic bindings. */
 final class ChromiumDownloadHooks {
     private final ChromiumProfile profile;
     private final ChromeRuntime runtime;
@@ -18,15 +18,7 @@ final class ChromiumDownloadHooks {
     }
 
     void install() {
-        if (profile.isVerifiedExact()) {
-            new ChromiumDownloadDialogs(profile, runtime.classLoader, hooks, prefs).install();
-            new ChromiumDownloadCompletionHooks(profile, runtime, hooks, prefs).install();
-        } else {
-            // Vendor forks frequently keep semantic Chromium entry points but obfuscate the owner
-            // classes/fields. Route them through the structural resolver instead of Chrome-specific
-            // fallback selectors or DownloadInfo field names.
-            new AdaptiveDownloadDialogsV2(runtime, hooks, prefs).install();
-            new AdaptiveDownloadCompletionHooks(profile, runtime, hooks, prefs).install();
-        }
+        new UniversalDownloadDialogs(profile, runtime, hooks, prefs).install();
+        new UniversalDownloadHooks(profile, runtime, hooks, prefs).install();
     }
 }

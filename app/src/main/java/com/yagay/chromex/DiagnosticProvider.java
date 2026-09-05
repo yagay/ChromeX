@@ -3,12 +3,17 @@ package com.yagay.chromex;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Process;
+
+import java.util.List;
 
 /** Cross-UID diagnostics and resolver-cache transport owned by ChromeX. */
 public final class DiagnosticProvider extends ContentProvider {
@@ -59,7 +64,7 @@ public final class DiagnosticProvider extends ContentProvider {
     @Override
     public Uri insert(Uri uri, ContentValues values) {
         if (!callerAllowed()) {
-            throw new SecurityException("ChromeX provider accepts only Chrome or ChromeX callers");
+            throw new SecurityException("ChromeX provider accepts only selected/browser callers");
         }
         if (values == null) return null;
         Context context = getContext();
@@ -86,9 +91,6 @@ public final class DiagnosticProvider extends ContentProvider {
                     prefs.edit().putString(Diagnostics.KEY_HIT_REPORT, text).apply();
                     break;
                 case KIND_EVENTS:
-                    // RuntimeDiagnostics sends a full cumulative event report. The legacy deep
-                    // scanner only emits a short SCAN completion/failure report after KIND_SCAN;
-                    // append that small report instead of replacing the useful runtime history.
                     if (isDeepScanEvent(text)) {
                         append(prefs, Diagnostics.KEY_EVENT_REPORT,
                                 "[deep-scan]\n" + text, MAX_EVENT_CHARS);
@@ -123,7 +125,9 @@ public final class DiagnosticProvider extends ContentProvider {
     private Uri putCache(Context context, ContentValues values) {
         String key = values.getAsString(COL_KEY);
         String value = values.getAsString(COL_VALUE);
-        if (key == null || key.isBlank() || value == null) return null;
+        if (key == null || key.isBlank() || value == null || !cacheKeyAllowedForCaller(key)) {
+            return null;
+        }
         synchronized (LOCK) {
             store(context).edit().putString(CACHE_PREFIX + key, value).commit();
         }
@@ -134,13 +138,13 @@ public final class DiagnosticProvider extends ContentProvider {
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
         if (!callerAllowed()) {
-            throw new SecurityException("ChromeX provider accepts only Chrome or ChromeX callers");
+            throw new SecurityException("ChromeX provider accepts only selected/browser callers");
         }
         if (!isCacheUri(uri)) return null;
         Context context = getContext();
         if (context == null) return null;
         String key = uri == null ? null : uri.getLastPathSegment();
-        if (key == null || "cache".equals(key)) return null;
+        if (key == null || "cache".equals(key) || !cacheKeyAllowedForCaller(key)) return null;
         String value = store(context).getString(CACHE_PREFIX + key, null);
         MatrixCursor cursor = new MatrixCursor(new String[]{COL_KEY, COL_VALUE}, 1);
         if (value != null) cursor.addRow(new Object[]{key, value});
@@ -166,7 +170,31 @@ public final class DiagnosticProvider extends ContentProvider {
                 + value.substring(value.length() - maxChars);
     }
 
+    /**
+     * Authorize by semantic browser role and explicit ChromeX selection rather than one package.
+     * Cache records are additionally package-bound by cacheKeyAllowedForCaller().
+     */
     private boolean callerAllowed() {
+        int uid = Binder.getCallingUid();
+        if (uid == Process.myUid()) return true;
+        Context context = getContext();
+        if (context == null) return false;
+        String[] packages = context.getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length == 0) return false;
+        SharedPreferences modulePrefs = context.getSharedPreferences(Config.FILE, Context.MODE_PRIVATE);
+        for (String pkg : packages) {
+            if (pkg == null) continue;
+            if (ChromiumTargets.isKnownPackage(pkg)
+                    || Config.isDynamicTarget(modulePrefs, pkg)
+                    || handlesHttps(context, pkg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean cacheKeyAllowedForCaller(String key) {
+        if (key == null || key.isBlank()) return false;
         int uid = Binder.getCallingUid();
         if (uid == Process.myUid()) return true;
         Context context = getContext();
@@ -174,9 +202,22 @@ public final class DiagnosticProvider extends ContentProvider {
         String[] packages = context.getPackageManager().getPackagesForUid(uid);
         if (packages == null) return false;
         for (String pkg : packages) {
-            if (Chrome145.PACKAGE.equals(pkg)) return true;
+            if (pkg != null && key.startsWith(pkg + ":")) return true;
         }
         return false;
+    }
+
+    private static boolean handlesHttps(Context context, String packageName) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.example.com/"));
+            intent.addCategory(Intent.CATEGORY_BROWSABLE);
+            intent.setPackage(packageName);
+            PackageManager pm = context.getPackageManager();
+            List<ResolveInfo> handlers = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL);
+            return handlers != null && !handlers.isEmpty();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     @Override

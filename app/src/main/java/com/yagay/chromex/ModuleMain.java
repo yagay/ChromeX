@@ -42,7 +42,7 @@ public final class ModuleMain extends XposedModule {
                 getFrameworkName(), getFrameworkVersion());
         hooks.info("Chromium target accepted: " + targetPackage);
 
-        installFeature("Chromium split bootstrap", () ->
+        installFeature("Chromium runtime bootstrap", () ->
                 new ChromeBootstrap(this, hooks, prefs, targetPackage, param.getClassLoader(),
                         param.getApplicationInfo(), this::installForRuntime).install());
     }
@@ -51,54 +51,35 @@ public final class ModuleMain extends XposedModule {
         RuntimeDiagnostics.flushPendingIfPossible();
         ChromiumProfile profile = ChromiumProfile.resolve(runtime, hooks);
         if (profile == null) {
-            hooks.warn("No compatible Chromium profile for " + targetPackage
+            hooks.warn("No Chromium engine profile for " + targetPackage
                     + " version=" + runtime.versionName);
             try { detach(); } catch (Throwable ignored) {}
             return;
         }
 
-        hooks.info("Chromium capability profile selected: " + profile.label()
+        hooks.info("Chromium engine fingerprint: profile=" + profile.label()
                 + " package=" + targetPackage
                 + " appVersion=" + runtime.versionName
                 + " engine=" + profile.engineVersion);
 
-        installFeature("same-name download overwrite", () -> {
-            if (profile.isAdaptive()) {
-                // Install the UI capture first so DuplicateDownloadDialogBridge#showDialog is
-                // observed before the overwrite hook consumes the dialog without proceeding to
-                // Chromium's original implementation.
-                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
-                new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
-            } else {
-                new SameNameOverwriteHooks(runtime, hooks, prefs).install();
-            }
-        });
-        installFeature("download history rewrite", () -> {
-            if (profile.isAdaptive()) {
-                new AdaptiveDownloadHistoryCompat(runtime, hooks, prefs).install();
-            } else {
-                new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install();
-            }
-        });
-        installFeature("Chromium tabs/homepage", () -> {
-            if (profile.isAdaptive()) {
-                new AdaptiveHomepageValueHooks(runtime, hooks, prefs).install();
-                new AdaptiveChromiumTabsHooks(profile, runtime, hooks, prefs).install();
-                new AdaptiveForkTabCompat(profile, runtime, hooks, prefs).install();
-            } else {
-                new ChromiumTabsHooks(profile, runtime, hooks, prefs).install();
-            }
-        });
-        installFeature("Chromium downloads", () ->
-                new ChromiumDownloadHooks(profile, runtime, hooks, prefs).install());
+        BrowserCapabilities capabilities =
+                new ChromiumCapabilityResolver(profile, runtime, hooks).resolve();
+        if (!capabilities.has(BrowserCapabilities.Key.CORE_RUNTIME, 60)) {
+            hooks.warn("Target rejected after capability probe: not enough Chromium anchors :: "
+                    + capabilities.get(BrowserCapabilities.Key.CORE_RUNTIME).detail);
+            try { detach(); } catch (Throwable ignored) {}
+            return;
+        }
+
+        new ChromiumFeatureOrchestrator(profile, capabilities, runtime, hooks, prefs).install();
 
         try {
             Diagnostics.scheduleScan(prefs, runtime.classLoader);
         } catch (Throwable t) {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
-        hooks.info("shared Chromium feature layers installed: " + profile.family
-                + " package=" + targetPackage + " engine=" + profile.engineVersion);
+        hooks.info("Chromium capability runtime ready: package=" + targetPackage
+                + " engine=" + profile.engineVersion);
     }
 
     private void installFeature(String name, Runnable installer) {
