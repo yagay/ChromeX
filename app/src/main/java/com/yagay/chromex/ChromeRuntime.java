@@ -7,11 +7,12 @@ import android.content.pm.PackageInfo;
 
 import java.io.File;
 
-/** Immutable runtime state after Chrome's isolated `chrome` split is actually ready. */
+/** Immutable runtime state after a Chromium browser's main classloader is actually ready. */
 final class ChromeRuntime {
     final Application application;
     final ApplicationInfo applicationInfo;
     final ClassLoader classLoader;
+    final String packageName;
     final String versionName;
     final long versionCode;
     final int majorVersion;
@@ -22,8 +23,9 @@ final class ChromeRuntime {
         this.application = application;
         this.applicationInfo = applicationInfo;
         this.classLoader = classLoader;
+        this.packageName = application == null ? "unknown" : application.getPackageName();
         this.chromeSplitPath = chromeSplitPath;
-        PackageInfo info = resolvePackageInfo(application);
+        PackageInfo info = resolvePackageInfo(application, packageName);
         this.versionName = info == null || info.versionName == null ? "unknown" : info.versionName;
         this.versionCode = info == null ? -1L : info.getLongVersionCode();
         this.majorVersion = parseMajor(versionName);
@@ -47,12 +49,13 @@ final class ChromeRuntime {
                 modified = file.lastModified();
             }
         } catch (Throwable ignored) {}
-        return versionCode + ":" + versionName + ":" + length + ":" + modified;
+        return packageName + ":" + versionCode + ":" + versionName + ":" + length + ":" + modified;
     }
 
-    private static PackageInfo resolvePackageInfo(Context context) {
+    private static PackageInfo resolvePackageInfo(Context context, String packageName) {
+        if (context == null || packageName == null) return null;
         try {
-            return context.getPackageManager().getPackageInfo(Chrome145.PACKAGE, 0);
+            return context.getPackageManager().getPackageInfo(packageName, 0);
         } catch (Throwable ignored) {
             return null;
         }
