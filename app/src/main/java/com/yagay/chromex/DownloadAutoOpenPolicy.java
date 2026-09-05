@@ -64,6 +64,15 @@ final class DownloadAutoOpenPolicy {
         if (isAny(ext, "txt", "md", "markdown", "json", "xml", "yaml", "yml", "log", "ini", "conf", "cfg")) {
             return Config.AUTO_OPEN_TEXT;
         }
+        if (isAny(ext, "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "avif", "svg")) {
+            return Config.AUTO_OPEN_IMAGE;
+        }
+        if (isAny(ext, "mp4", "mkv", "webm", "avi", "mov", "m4v", "3gp", "ts", "m2ts", "flv")) {
+            return Config.AUTO_OPEN_VIDEO;
+        }
+        if (isAny(ext, "mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "amr")) {
+            return Config.AUTO_OPEN_AUDIO;
+        }
         if (mime.startsWith("image/")) return Config.AUTO_OPEN_IMAGE;
         if (mime.startsWith("video/")) return Config.AUTO_OPEN_VIDEO;
         if (mime.startsWith("audio/")) return Config.AUTO_OPEN_AUDIO;
