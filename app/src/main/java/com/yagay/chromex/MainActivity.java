@@ -3,9 +3,11 @@ package com.yagay.chromex;
 import android.app.Activity;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -23,6 +25,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
     private LinearLayout content;
     private TextView status;
     private SharedPreferences prefs;
+    private int basePadding;
 
     private static final String[][] ITEMS = {
             {Config.CLEAN_START, "冷启动只保留主页"},
@@ -47,10 +50,19 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(20);
-        content.setPadding(p, p, p, p);
+        basePadding = dp(20);
+        content.setPadding(basePadding, basePadding, basePadding, basePadding);
         scroll.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // targetSdk 37 uses edge-to-edge behavior. Apply real system-bar insets instead of relying
+        // on a fixed top/bottom padding, which avoids overlap on Android 16/17 and OEM variants.
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            content.setPadding(basePadding + bars.left, basePadding + bars.top,
+                    basePadding + bars.right, basePadding + bars.bottom);
+            return insets;
+        });
 
         TextView title = new TextView(this);
         title.setText("ChromeX");
@@ -128,9 +140,8 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(heading);
 
         TextView help = new TextView(this);
-        help.setText("正常使用会等待 Chrome 的 chrome split ClassLoader 就绪后再安装 Hook；"
-                + "未知新版优先用稳定 API 与 DexKit 结构解析，不再误用旧版 R8 短类名。\n"
-                + "深度诊断默认关闭，仅在排查升级兼容性时开启；Resolver 缓存会跨诊断重扫保留。\n"
+        help.setText("轻量诊断（Hook 安装、命中、错误、版本）始终保留；未知新版优先使用稳定 API 与 DexKit 结构解析。\n"
+                + "深度诊断仅用于重新定位 Hook 点，扫描完成后会自动关闭；Resolver 缓存会跨重扫保留。\n"
                 + "最后深度扫描: " + lastScanText());
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(8));
@@ -147,7 +158,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         }, "ChromeX-root-probe").start();
 
         Switch diagnostic = new Switch(this);
-        diagnostic.setText("深度诊断模式（仅调试/重新定位时开启）");
+        diagnostic.setText("深度诊断模式（一次扫描后自动关闭）");
         diagnostic.setTextSize(16f);
         diagnostic.setChecked(Config.get(prefs, Config.DIAGNOSTIC_MODE));
         diagnostic.setPadding(0, dp(6), 0, dp(6));
@@ -170,7 +181,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
                     scan.setEnabled(true);
                     Toast.makeText(this,
                             restarted
-                                    ? "Chrome 已重新启动。请触发失效功能，约 3 秒后即可导出。"
+                                    ? "Chrome 已重新启动。请触发失效功能；深度扫描完成后会自动关闭。"
                                     : "ChromeX 没有可用 Root。旧诊断已清理，请手动强制结束 Chrome 后重新打开。",
                             Toast.LENGTH_LONG).show();
                 });
