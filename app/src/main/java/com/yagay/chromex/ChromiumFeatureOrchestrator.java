@@ -28,6 +28,7 @@ final class ChromiumFeatureOrchestrator {
         installOverwriteConfirmationPolicy();
         installSameNameOverwrite();
         installCompletionNameNormalizer();
+        installOfflineDisplayNameNormalizer();
         installDownloadHistory();
         installTabs();
         installDownloads();
@@ -70,6 +71,15 @@ final class ChromiumFeatureOrchestrator {
         }
         install("completion filename normalization", () ->
                 new CompletionNameNormalizerHooks(profile, runtime, hooks, prefs).install());
+    }
+
+    private void installOfflineDisplayNameNormalizer() {
+        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI, 60)) {
+            skip("offline display-name normalization", "OfflineItem UI capability incomplete");
+            return;
+        }
+        install("offline display-name normalization", () ->
+                new OfflineItemDisplayNameNormalizer(runtime, hooks).install());
     }
 
     private void installDownloadHistory() {
