@@ -25,6 +25,7 @@ final class ChromiumFeatureOrchestrator {
 
     void install() {
         installDownloadSourceBindings();
+        installOverwriteConfirmationPolicy();
         installSameNameOverwrite();
         installCompletionNameNormalizer();
         installDownloadHistory();
@@ -41,6 +42,12 @@ final class ChromiumFeatureOrchestrator {
             renameBinding = new OfflineContentRenameBinding(profile, runtime, hooks);
             renameBinding.install();
         });
+    }
+
+    private void installOverwriteConfirmationPolicy() {
+        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 60)) return;
+        install("overwrite duplicate confirmation policy", () ->
+                OverwriteConfirmationPolicy.install(runtime, hooks, prefs));
     }
 
     private void installSameNameOverwrite() {
