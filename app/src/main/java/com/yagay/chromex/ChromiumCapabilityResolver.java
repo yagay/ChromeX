@@ -342,6 +342,7 @@ final class ChromiumCapabilityResolver {
         return null;
     }
 
+    /** Resolve a stable semantic method only when its signature bucket is unambiguous. */
     private Method method(String owner, String name, int parameterCount) {
         if (owner == null || name == null) return null;
         try {
@@ -350,17 +351,20 @@ final class ChromiumCapabilityResolver {
             for (Method method : type.getDeclaredMethods()) {
                 if (!name.equals(method.getName()) || Modifier.isAbstract(method.getModifiers())
                         || method.getParameterCount() != parameterCount) continue;
-                if (found != null) return found; // same semantic name; first declared overload wins.
+                if (found != null) return null;
                 method.setAccessible(true);
                 found = method;
             }
             if (found != null) return found;
+
             for (Method method : type.getMethods()) {
                 if (!name.equals(method.getName()) || Modifier.isAbstract(method.getModifiers())
                         || method.getParameterCount() != parameterCount) continue;
+                if (found != null) return null;
                 method.setAccessible(true);
-                return method;
+                found = method;
             }
+            return found;
         } catch (Throwable ignored) {}
         return null;
     }
