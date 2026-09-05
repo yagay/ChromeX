@@ -1,0 +1,32 @@
+name: Chromium 152 Desktop Android Config Check
+
+on:
+  push:
+    branches: [ plus ]
+    paths:
+      - 'chromium-desktop-152/**'
+      - '.github/workflows/chromium152-config-check.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: bash -n chromium-desktop-152/build.sh
+      - name: Python syntax
+        run: |
+          python3 -m py_compile \
+            chromium-desktop-152/verify_gn.py \
+            chromium-desktop-152/verify_artifacts.py
+      - name: Validate required GN args
+        run: |
+          grep -Eq '^target_os = "android"$' chromium-desktop-152/args.gn
+          grep -Eq '^target_cpu = "arm64"$' chromium-desktop-152/args.gn
+          grep -Eq '^is_desktop_android = true$' chromium-desktop-152/args.gn
+      - name: Validate fixed Chromium tag and targets
+        run: |
+          grep -q 'TAG="152.0.7977.75"' chromium-desktop-152/build.sh
+          grep -q 'trichrome_chrome_64_bundle' chromium-desktop-152/build.sh
+          grep -q 'trichrome_library_64_apk' chromium-desktop-152/build.sh
