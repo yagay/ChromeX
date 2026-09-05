@@ -1,15 +1,16 @@
 package com.yagay.chromex;
 
-/**
- * FULL backend placeholder. It becomes operational only after verified Java/JNI bridge
- * bindings are resolved for the target browser. Keeping this class inert avoids invoking
- * vendor-specific extension internals merely because native markers are present.
- */
+import java.io.File;
+import java.util.List;
+
+/** FULL backend for Chromium forks that already ship a native extension runtime. */
 public final class NativeExtensionBackend implements ExtensionBackend {
     private final ExtensionCapabilityReport report;
+    private final NativeExtensionBridgeResolver.Binding binding;
 
-    public NativeExtensionBackend(ExtensionCapabilityReport report) {
+    public NativeExtensionBackend(ExtensionCapabilityReport report, ClassLoader classLoader) {
         this.report = report;
+        this.binding = NativeExtensionBridgeResolver.resolve(classLoader);
     }
 
     @Override
@@ -19,12 +20,34 @@ public final class NativeExtensionBackend implements ExtensionBackend {
 
     @Override
     public boolean isAvailable() {
-        return report != null && report.mode == ExtensionRuntimeMode.FULL;
+        return report != null && report.mode == ExtensionRuntimeMode.FULL
+                && binding != null && binding.hasAnyCallableBridge();
+    }
+
+    @Override
+    public List<String> getInstalledExtensionIds() {
+        return NativeExtensionBridgeResolver.listExtensionIds(binding);
+    }
+
+    @Override
+    public boolean installCrx(File crx) {
+        return NativeExtensionBridgeResolver.installCrx(binding, crx);
+    }
+
+    @Override
+    public boolean uninstall(String extensionId) {
+        return NativeExtensionBridgeResolver.uninstall(binding, extensionId);
+    }
+
+    @Override
+    public boolean executeAction(String extensionId) {
+        return NativeExtensionBridgeResolver.executeAction(binding, extensionId);
     }
 
     @Override
     public String diagnostics() {
-        return "FULL backend selected; bridge binding pending\n" +
-                (report == null ? "no capability report" : report.toDiagnosticText());
+        return "FULL backend selected\navailable=" + isAvailable() + "\n"
+                + (binding == null ? "bridge=null\n" : binding.diagnosticsText())
+                + (report == null ? "no capability report" : report.toDiagnosticText());
     }
 }
