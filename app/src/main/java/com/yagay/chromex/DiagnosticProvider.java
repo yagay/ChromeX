@@ -28,6 +28,7 @@ public final class DiagnosticProvider extends ContentProvider {
     static final String KIND_EVENTS = "events";
     static final String KIND_SCAN = "scan";
 
+    private static final int MAX_SESSION_CHARS = 24_000;
     private static final int MAX_HOOK_CHARS = 120_000;
     private static final Object LOCK = new Object();
 
@@ -38,6 +39,13 @@ public final class DiagnosticProvider extends ContentProvider {
 
     static SharedPreferences store(Context context) {
         return context.getSharedPreferences(STORE_FILE, Context.MODE_PRIVATE);
+    }
+
+    static void clearStore(Context context) {
+        if (context == null) return;
+        synchronized (LOCK) {
+            store(context).edit().clear().commit();
+        }
     }
 
     @Override
@@ -60,11 +68,9 @@ public final class DiagnosticProvider extends ContentProvider {
         synchronized (LOCK) {
             switch (kind) {
                 case KIND_SESSION:
-                    prefs.edit()
-                            .clear()
-                            .putString(Diagnostics.KEY_SESSION, text)
-                            .putLong(Diagnostics.KEY_LAST_SCAN, 0L)
-                            .apply();
+                    // Chrome has several processes. Never clear here, otherwise a late subprocess
+                    // can erase hook-install data already written by the browser process.
+                    append(prefs, Diagnostics.KEY_SESSION, text, MAX_SESSION_CHARS);
                     break;
                 case KIND_HOOK:
                     append(prefs, Diagnostics.KEY_HOOK_REPORT, text, MAX_HOOK_CHARS);
