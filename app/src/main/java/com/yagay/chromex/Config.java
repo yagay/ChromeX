@@ -14,6 +14,7 @@ public final class Config {
     public static final String BYPASS_DANGEROUS = "bypass_dangerous";
     public static final String BYPASS_INSECURE = "bypass_insecure";
     public static final String BYPASS_DUPLICATE = "bypass_duplicate";
+    public static final String OVERWRITE_DUPLICATE = "overwrite_duplicate";
     public static final String BYPASS_POLICY = "bypass_policy";
     public static final String BYPASS_LOCATION = "bypass_location";
     public static final String BYPASS_OPEN = "bypass_open";
@@ -36,6 +37,12 @@ public final class Config {
     public static boolean get(SharedPreferences prefs, String key) {
         if (prefs == null) return defaultValue(key);
         try {
+            // Overwrite owns the duplicate-conflict decision. When enabled, suppress the older
+            // "accept duplicate" hook so it cannot race ahead and let Chromium uniquify to (1).
+            if (BYPASS_DUPLICATE.equals(key)
+                    && prefs.getBoolean(OVERWRITE_DUPLICATE, defaultValue(OVERWRITE_DUPLICATE))) {
+                return false;
+            }
             return prefs.getBoolean(key, defaultValue(key));
         } catch (Throwable ignored) {
             return defaultValue(key);
@@ -43,9 +50,11 @@ public final class Config {
     }
 
     public static boolean defaultValue(String key) {
-        // Deep diagnostic scans are intentionally opt-in because Chrome contains thousands of DEX
-        // classes. The "重新定位 Hook 点" button enables this before restarting Chrome.
-        if (DIAGNOSTIC_MODE.equals(key) || ALL_DOWNLOAD_TOAST.equals(key)) return false;
+        // Destructive overwrite is opt-in. Deep diagnostic scans and all-download Toast are also
+        // opt-in; the remaining convenience features keep their historical enabled defaults.
+        if (DIAGNOSTIC_MODE.equals(key)
+                || ALL_DOWNLOAD_TOAST.equals(key)
+                || OVERWRITE_DUPLICATE.equals(key)) return false;
         return true;
     }
 }
