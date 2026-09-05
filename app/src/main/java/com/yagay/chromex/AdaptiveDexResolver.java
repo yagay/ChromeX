@@ -2,6 +2,8 @@ package com.yagay.chromex;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -133,29 +135,39 @@ final class AdaptiveDexResolver {
             remember(runtime, key, cached);
             return cached;
         }
-        if (!canScan(runtime, hooks)) return null;
+        if (!loadNative(hooks)) return null;
 
-        try (DexKitBridge bridge = DexKitBridge.create(runtime.chromeSplitPath)) {
-            MethodData data = bridge.findMethod(FindMethod.create()
-                    .matcher(MethodMatcher.create().name(semanticName).returnType("void")))
-                    .single();
-            Method method = data.getMethodInstance(runtime.classLoader);
-            if (!Modifier.isStatic(method.getModifiers())) return null;
-            try { method.setAccessible(true); } catch (Throwable ignored) {}
-            remember(runtime, key, method);
-            ResolverCacheClient.put(runtime, key, encode(method));
-            hooks.info("adaptive resolver: native trampoline=" + semanticName + " -> " + encode(method));
-            return method;
-        } catch (Throwable t) {
-            hooks.warn("adaptive resolver: native trampoline unavailable " + semanticName
-                    + " :: " + t.getClass().getSimpleName());
-            return null;
+        Throwable last = null;
+        for (String dexPath : semanticDexPaths(runtime)) {
+            try (DexKitBridge bridge = DexKitBridge.create(dexPath)) {
+                MethodData data = bridge.findMethod(FindMethod.create()
+                        .matcher(MethodMatcher.create().name(semanticName).returnType("void")))
+                        .single();
+                Method method = data.getMethodInstance(runtime.classLoader);
+                if (!Modifier.isStatic(method.getModifiers())) continue;
+                try { method.setAccessible(true); } catch (Throwable ignored) {}
+                remember(runtime, key, method);
+                ResolverCacheClient.put(runtime, key, encode(method));
+                hooks.info("adaptive resolver: native trampoline=" + semanticName + " -> "
+                        + encode(method) + " source=" + sourceLabel(runtime, dexPath));
+                return method;
+            } catch (Throwable t) {
+                last = t;
+            }
         }
+
+        hooks.warn("adaptive resolver: native trampoline unavailable " + semanticName
+                + " :: " + (last == null ? "no dex path" : last.getClass().getSimpleName()));
+        return null;
     }
 
     static Object singletonOwner(Method method) {
         if (method == null || Modifier.isStatic(method.getModifiers())) return null;
-        Class<?> type = method.getDeclaringClass();
+        return singletonOwner(method.getDeclaringClass());
+    }
+
+    static Object singletonOwner(Class<?> type) {
+        if (type == null) return null;
         Method found = null;
         for (Method candidate : type.getDeclaredMethods()) {
             if (!Modifier.isStatic(candidate.getModifiers()) || candidate.getParameterCount() != 0
@@ -167,6 +179,37 @@ final class AdaptiveDexResolver {
         if (found == null) return null;
         try { return found.invoke(null); }
         catch (Throwable ignored) { return null; }
+    }
+
+    private static Set<String> semanticDexPaths(ChromeRuntime runtime) {
+        LinkedHashSet<String> paths = new LinkedHashSet<>();
+        if (runtime == null) return paths;
+        if (runtime.chromeSplitPath != null && !runtime.chromeSplitPath.isBlank()) {
+            paths.add(runtime.chromeSplitPath);
+        }
+        try {
+            if (runtime.applicationInfo != null && runtime.applicationInfo.sourceDir != null) {
+                paths.add(runtime.applicationInfo.sourceDir);
+            }
+        } catch (Throwable ignored) {}
+        try {
+            if (runtime.applicationInfo != null && runtime.applicationInfo.splitSourceDirs != null) {
+                for (String path : runtime.applicationInfo.splitSourceDirs) {
+                    if (path != null && !path.isBlank()) paths.add(path);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return paths;
+    }
+
+    private static String sourceLabel(ChromeRuntime runtime, String path) {
+        if (runtime != null && runtime.chromeSplitPath != null
+                && runtime.chromeSplitPath.equals(path)) return "chrome-split";
+        try {
+            if (runtime != null && runtime.applicationInfo != null
+                    && path.equals(runtime.applicationInfo.sourceDir)) return "base-apk";
+        } catch (Throwable ignored) {}
+        return "split";
     }
 
     private static boolean plausibleEngineVersion(String value) {
