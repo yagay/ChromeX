@@ -40,15 +40,33 @@ public final class LiteExtensionBackend implements ExtensionBackend {
     @Override
     public boolean uninstall(String extensionId) {
         Context context = context();
-        return context != null && LiteExtensionStore.uninstall(context, extensionId);
+        if (context == null) return false;
+        boolean removed = LiteExtensionStore.uninstall(context, extensionId);
+        if (removed) LiteExtensionState.remove(context, extensionId);
+        return removed;
+    }
+
+    @Override
+    public boolean setEnabled(String extensionId, boolean enabled) {
+        Context context = context();
+        return context != null && getInstalledExtensionIds().contains(extensionId)
+                && LiteExtensionState.setEnabled(context, extensionId, enabled);
     }
 
     @Override
     public String diagnostics() {
+        Context context = context();
+        int enabled = 0;
+        if (context != null) {
+            for (String id : getInstalledExtensionIds()) {
+                if (LiteExtensionState.isEnabled(context, id)) enabled++;
+            }
+        }
         return "LITE backend selected\navailable=" + isAvailable()
-                + "\ninstalled=" + getInstalledExtensionIds().size() + "\n"
+                + "\ninstalled=" + getInstalledExtensionIds().size()
+                + "\nenabled=" + enabled + "\n"
                 + "supported=content_scripts(js/css),matches,exclude_matches,"
-                + "chrome.runtime.id,chrome.storage.local(polyfill)\n"
+                + "chrome.runtime.id,chrome.storage.local(polyfill),enable/disable\n"
                 + "limitations=main-frame/page-world/document-end compatibility;"
                 + " no Extension Core/service-worker/webRequest\n"
                 + (report == null ? "no capability report" : report.toDiagnosticText());
