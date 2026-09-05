@@ -23,7 +23,6 @@ public final class ModuleMain extends XposedModule {
         if (!Chrome145.PACKAGE.equals(param.getPackageName())) return;
         if (!param.isFirstPackage()) return;
 
-        // Browser/UI/download hooks belong only in Chrome's main browser process.
         if (!Chrome145.PACKAGE.equals(processName)) {
             log(Log.INFO, "ChromeX", "skip secondary Chrome process: " + processName);
             try {
@@ -41,17 +40,15 @@ public final class ModuleMain extends XposedModule {
             log(Log.WARN, "ChromeX", "diagnostic session init failed", t);
         }
 
-        // Do NOT install browser hooks using PackageReadyParam#getClassLoader directly. Chrome uses
-        // isolated feature splits and the `chrome` split becomes available later during Application
-        // startup. Bootstrap waits for that real split ClassLoader and only then installs features.
+        // Chrome's browser Java code lives in an isolated feature split. PackageReadyParam only
+        // describes the loader at that instant, so defer all browser hooks until the `chrome` split
+        // is confirmed loadable.
         installFeature("Chrome split bootstrap", () ->
                 new ChromeBootstrap(this, hooks, prefs, param.getClassLoader(),
                         param.getApplicationInfo(), this::installForRuntime).install());
     }
 
     private void installForRuntime(ChromeRuntime runtime) {
-        // Re-emit a session after Application/context and split loader are ready. This guarantees
-        // the exported report records the real Chrome version and the loader used for hooks.
         try {
             Diagnostics.beginSession(prefs, processName, getApiVersion(),
                     getFrameworkName(), getFrameworkVersion());
@@ -64,7 +61,7 @@ public final class ModuleMain extends XposedModule {
             installFeature("Chrome 152 runtime corrections", () ->
                     new Chrome152Corrections(this, hooks, prefs, loader).install());
         } else if (runtime.is145()) {
-            // Only Chrome 145 may use the old short R8 symbols in these compatibility classes.
+            // Legacy short R8 names are strictly confined to the release they were verified on.
             installFeature("Chrome 145 tab hooks", () ->
                     new TabHooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 145 download dialog hooks", () ->
@@ -75,11 +72,12 @@ public final class ModuleMain extends XposedModule {
                     new BannerHooks(this, hooks, prefs, loader).install());
             hooks.info("Chrome 145 compatibility profile active: " + runtime.versionName);
         } else {
-            // Unknown/new Chrome builds never touch release-specific short R8 names. Stable Java
-            // boundaries and DexKit structural lookups are used instead and unsupported features
-            // fail independently rather than risking hooks on unrelated classes.
+            // New/unknown Chrome builds never touch release-specific short names or numeric J.N
+            // selectors. Stable boundaries + DexKit structural resolution are used instead.
             installFeature("adaptive Chrome hooks", () ->
                     new AdaptiveChromeHooks(this, hooks, prefs, runtime).install());
+            installFeature("adaptive download dialogs", () ->
+                    new AdaptiveDownloadDialogs(runtime, hooks, prefs).install());
         }
 
         try {
