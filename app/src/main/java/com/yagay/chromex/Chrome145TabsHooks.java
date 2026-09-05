@@ -13,9 +13,9 @@ import java.util.WeakHashMap;
 
 /** Exact Chrome 145.0.7632.218 tab/homepage profile. */
 final class Chrome145TabsHooks {
-    private static final long COLD_DELAY_MS = 1500L;
-    private static final long RETRY_DELAY_MS = 1200L;
-    private static final int MAX_ROUNDS = 4;
+    private static final long COLD_DELAY_MS = 500L;
+    private static final long RETRY_DELAY_MS = 600L;
+    private static final int MAX_ROUNDS = 6;
 
     private final HookSupport hooks;
     private final SharedPreferences prefs;
@@ -60,12 +60,9 @@ final class Chrome145TabsHooks {
                         Activity activity = (Activity) receiver;
                         if (activity.isFinishing() && isChromeTabbedActivity(activity)
                                 && Config.get(prefs, Config.CLEAR_CLOSED_TABS)) {
-                            try {
-                                closeAllModels(activity);
-                                clearClosedHistory();
-                            } catch (Throwable t) {
-                                hooks.error("Chrome 145 exit cleanup", t);
-                            }
+                            boolean suppressed = closeAllModels(activity, true);
+                            if (!suppressed) clearClosedHistory();
+                            hooks.info("Chrome 145 exit cleanup applied; restoreSuppressed=" + suppressed);
                         }
                     }
                     return chain.proceed();
@@ -73,15 +70,11 @@ final class Chrome145TabsHooks {
     }
 
     private boolean isChromeTabbedActivity(Activity activity) {
-        try {
-            return Reflect.cls(loader, Chrome145.ACTIVITY).isInstance(activity);
-        } catch (Throwable ignored) {
-            return Chrome145.ACTIVITY.equals(activity.getClass().getName());
-        }
+        try { return Reflect.cls(loader, Chrome145.ACTIVITY).isInstance(activity); }
+        catch (Throwable ignored) { return Chrome145.ACTIVITY.equals(activity.getClass().getName()); }
     }
 
     private void installNewTabRedirects() {
-        // Stable Chromium paths when they survive this release's R8 layout.
         hooks.all(loader, Chrome145.CHROME_TAB_CREATOR, "createNewTab",
                 "chromex145:tabs:createNewTab", chain -> {
                     if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
@@ -113,7 +106,6 @@ final class Chrome145TabsHooks {
                     return chain.proceed(args);
                 });
 
-        // Verified Chrome 145 R8 creator path.
         hooks.all(loader, Chrome145.TAB_CREATOR, "l", "chromex145:tabs:creator", chain -> {
             if (!Config.get(prefs, Config.NEWTAB_HOME) || chain.getArgs().isEmpty()) {
                 return chain.proceed();
@@ -134,9 +126,7 @@ final class Chrome145TabsHooks {
     private void scheduleColdStart(Activity activity) {
         if (!Config.get(prefs, Config.CLEAN_START)) return;
         Intent intent = activity.getIntent();
-        if (intent == null || !Intent.ACTION_MAIN.equals(intent.getAction()) || intent.getData() != null) {
-            return;
-        }
+        if (intent == null || !Intent.ACTION_MAIN.equals(intent.getAction()) || intent.getData() != null) return;
         synchronized (handled) {
             if (!handled.add(activity)) return;
         }
@@ -158,13 +148,17 @@ final class Chrome145TabsHooks {
                 retry(activity, round);
                 return;
             }
-            closeEverythingExcept(regular, keep);
+
+            boolean suppressed = TabCloseStrategy.closeExcept(loader, regular, keep, hooks, false);
             Object incognito = model(activity, true);
-            if (incognito != null && incognito != regular) closeAll(incognito);
+            if (incognito != null && incognito != regular) {
+                suppressed &= TabCloseStrategy.closeAll(loader, incognito, hooks, false);
+            }
 
             if (count(regular) <= 1 || round + 1 >= MAX_ROUNDS) {
-                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS)) clearClosedHistory();
-                hooks.info("Chrome 145 cold start settled on configured homepage at round " + round);
+                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS) && !suppressed) clearClosedHistory();
+                hooks.info("Chrome 145 cold start settled on configured homepage at round " + round
+                        + " restoreSuppressed=" + suppressed);
             } else {
                 retry(activity, round);
             }
@@ -180,7 +174,6 @@ final class Chrome145TabsHooks {
     }
 
     private Object model(Activity activity, boolean incognito) {
-        // Stable selector first.
         try {
             Class<?> type = Reflect.cls(loader, "org.chromium.chrome.browser.tabmodel.TabModelSelector");
             Object selector = Reflect.findFieldValueByType(activity, type);
@@ -194,7 +187,6 @@ final class Chrome145TabsHooks {
             }
         } catch (Throwable ignored) {}
 
-        // Exact 145 fallback.
         try {
             Class<?> type = Reflect.cls(loader, Chrome145.SELECTOR);
             Object selector = Reflect.findFieldValueByType(activity, type);
@@ -221,9 +213,7 @@ final class Chrome145TabsHooks {
             Object gurl = Reflect.call(instance, "b", Boolean.FALSE);
             String value = gurlText(gurl);
             return value == null || value.isBlank() ? Chrome145.NTP : value;
-        } catch (Throwable ignored) {
-            return Chrome145.NTP;
-        }
+        } catch (Throwable ignored) { return Chrome145.NTP; }
     }
 
     private Object findHomeTab(Object model, String home) {
@@ -233,8 +223,6 @@ final class Chrome145TabsHooks {
             if (tab == null) continue;
             try {
                 String url = gurlText(Reflect.call(tab, "getUrl"));
-                // A custom homepage must match exactly. NTP is accepted only when NTP itself is
-                // the configured homepage; this fixes the legacy "any NTP counts as home" bug.
                 if ((isNtp(home) && isNtp(url)) || (home != null && home.equals(url))) return tab;
             } catch (Throwable ignored) {}
         }
@@ -250,7 +238,7 @@ final class Chrome145TabsHooks {
                 Class<?>[] p = method.getParameterTypes();
                 if (p.length != 2 || p[1] != int.class || method.getReturnType() == void.class) continue;
                 if (!p[0].isAssignableFrom(gurlType) && !gurlType.isAssignableFrom(p[0])) continue;
-                method.setAccessible(true);
+                try { method.setAccessible(true); } catch (Throwable ignored) {}
                 Object value = method.invoke(model, gurl, 2);
                 if (value != null) return value;
             }
@@ -260,15 +248,22 @@ final class Chrome145TabsHooks {
         return null;
     }
 
+    private boolean closeAllModels(Activity activity, boolean uponExit) {
+        boolean suppressed = true;
+        suppressed &= TabCloseStrategy.closeAll(loader, model(activity, false), hooks, uponExit);
+        suppressed &= TabCloseStrategy.closeAll(loader, model(activity, true), hooks, uponExit);
+        return suppressed;
+    }
+
     private int count(Object model) {
         try {
             Object value = Reflect.call(model, "getCount");
-            if (value instanceof Integer) return (Integer) value;
+            if (value instanceof Number) return ((Number) value).intValue();
         } catch (Throwable ignored) {}
         try {
             Method method = Reflect.signature(model.getClass(), int.class);
             Object value = method == null ? null : method.invoke(model);
-            return value instanceof Integer ? (Integer) value : 0;
+            return value instanceof Number ? ((Number) value).intValue() : 0;
         } catch (Throwable ignored) { return 0; }
     }
 
@@ -277,55 +272,12 @@ final class Chrome145TabsHooks {
         catch (Throwable ignored) { return null; }
     }
 
-    private void closeEverythingExcept(Object model, Object keep) {
-        for (int i = count(model) - 1; i >= 0; i--) {
-            Object tab = tabAt(model, i);
-            if (tab != null && tab != keep) closeTab(model, tab);
-        }
-    }
-
-    private void closeAllModels(Activity activity) {
-        closeAll(model(activity, false));
-        closeAll(model(activity, true));
-    }
-
-    private void closeAll(Object model) {
-        if (model == null) return;
-        try {
-            Reflect.call(model, "closeAllTabs", Boolean.FALSE, Boolean.TRUE);
-            return;
-        } catch (Throwable ignored) {}
-        try {
-            Reflect.call(model, "forceCloseAllTabs");
-            return;
-        } catch (Throwable ignored) {}
-        for (int i = count(model) - 1; i >= 0; i--) {
-            Object tab = tabAt(model, i);
-            if (tab != null) closeTab(model, tab);
-        }
-    }
-
-    private void closeTab(Object model, Object tab) {
-        try {
-            Reflect.call(model, "closeTab", tab, Boolean.FALSE, Boolean.TRUE, Boolean.FALSE);
-            return;
-        } catch (Throwable ignored) {}
-        try {
-            Class<?> tabType = Reflect.cls(loader, "org.chromium.chrome.browser.tab.Tab");
-            Method method = Reflect.exact(model.getClass(), "closeTab", tabType);
-            method.invoke(model, tab);
-        } catch (Throwable ignored) {}
-    }
-
     private void clearClosedHistory() {
         try {
             Class<?> pm = Reflect.cls(loader, Chrome145.PROFILE_MANAGER);
             Object profile;
-            try {
-                profile = Reflect.callStatic(pm, "getLastUsedRegularProfile");
-            } catch (Throwable ignored) {
-                profile = Reflect.exact(pm, "b").invoke(null);
-            }
+            try { profile = Reflect.callStatic(pm, "getLastUsedRegularProfile"); }
+            catch (Throwable ignored) { profile = Reflect.exact(pm, "b").invoke(null); }
             if (profile == null) return;
             Class<?> nativeClass = Reflect.cls(loader, Chrome145.NATIVE);
             Method method = Reflect.exact(nativeClass, "VIOOOOOOO",
