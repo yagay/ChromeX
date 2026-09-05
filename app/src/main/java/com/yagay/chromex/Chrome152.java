@@ -43,10 +43,13 @@ final class Chrome152 {
             Class<?> gurl = Reflect.cls(loader, Chrome145.GURL);
             Class<?> homepage = Reflect.cls(loader, HOMEPAGE);
             Method singleton = Reflect.exact(homepage, "d");
-            Method getter = Reflect.exact(homepage, "e", boolean.class);
+            Method ntpGetter = Reflect.exact(homepage, "e", boolean.class);
+            Method homepageGetter = Reflect.exact(homepage, "b", boolean.class, boolean.class);
             if (!Modifier.isStatic(singleton.getModifiers())
                     || singleton.getReturnType() != homepage
-                    || getter.getReturnType() != gurl) return false;
+                    || ntpGetter.getReturnType() != gurl
+                    || Modifier.isStatic(homepageGetter.getModifiers())
+                    || homepageGetter.getReturnType() != gurl) return false;
 
             Class<?> loadUrl = Reflect.cls(loader, Chrome145.LOAD_URL_PARAMS);
             Class<?> creator = Reflect.cls(loader, TAB_CREATOR);
