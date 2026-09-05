@@ -468,16 +468,12 @@ final class UniversalDownloadHooks {
 
         /**
          * Source and legacy callbacks for one completed download must collapse to the same key.
-         * Prefer normalized file identity; ContentId is only the fallback when no file metadata is
-         * available yet.
+         * File identity wins over MIME because Chromium models can report equivalent MIME metadata
+         * differently. ContentId is only the fallback when no file metadata is available yet.
          */
         String key() {
-            if (path != null && !path.isBlank()) {
-                return "file:" + path + '|' + String.valueOf(mime);
-            }
-            if (name != null && !name.isBlank()) {
-                return "name:" + name + '|' + String.valueOf(mime);
-            }
+            if (path != null && !path.isBlank()) return "file:" + path;
+            if (name != null && !name.isBlank()) return "name:" + name;
             if (contentKey != null && !contentKey.isBlank()) return "content:" + contentKey;
             return "unknown:" + String.valueOf(mime);
         }
