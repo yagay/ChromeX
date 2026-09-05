@@ -26,27 +26,17 @@ import java.net.URL;
 import java.security.MessageDigest;
 import java.util.Locale;
 
-/** Root installer for the Google-signed Aluminium Chrome 145 + matching Trichrome pair. */
+/** Root installer for the Google-signed Aluminium Chrome + matching Trichrome pair. */
 public final class AluminiumInstallerActivity extends Activity {
-    static final String VERSION_NAME = "145.0.7632.218";
-    static final long VERSION_CODE = 763221864L;
     static final String CHROME_PACKAGE = "com.android.chrome";
     static final String TRICHROME_PACKAGE = "com.google.android.trichromelibrary";
 
-    // Stored outside the ChromeX APK. Publish these exact asset names in the repository release.
-    static final String RELEASE_BASE = "https://github.com/yagay/ChromeX/releases/download/aluminium-145/";
-    static final String CHROME_ASSET = "Chrome-Aluminium-145.0.7632.218-arm64.apk";
-    static final String TRICHROME_ASSET = "TrichromeLibrary-Aluminium-145.0.7632.218-arm64.apk";
-
-    // APKMirror-published file SHA-256 values for the exact Aluminium OS CL2B.260330.037 pair.
-    static final String CHROME_SHA256 = "e98864496f5b56d59253f5da997f8d509a47da0d4ce2a2eb98b16a5538a9d387";
-    static final String TRICHROME_SHA256 = "dd620578ab8ae923b5262d5d9803acf821e5a1e9f56ef33d13a17acb91577008";
-    static final String CHROME_CERT_SHA256 = "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83";
-    static final String TRICHROME_CERT_SHA256 = "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1";
-
     private final Handler main = new Handler(Looper.getMainLooper());
     private TextView state;
+    private TextView help;
     private Button install;
+    private Button refresh;
+    private volatile AluminiumReleaseCatalog.Release target;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -60,14 +50,12 @@ public final class AluminiumInstallerActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
-        title.setText("Aluminium 145 一键安装");
+        title.setText("Aluminium 一键安装");
         title.setTextSize(26f);
         box.addView(title);
 
-        TextView help = new TextView(this);
-        help.setText("从 ChromeX GitHub Release 下载 Google 原版 Aluminium Chrome 145 与匹配 Trichrome。\n"
-                + "安装前校验 SHA-256、包名、版本号与 Google 证书；只使用 Root 的 PackageManager 降级能力，"
-                + "不会全局关闭 Android 签名校验。\n\n目标版本：" + VERSION_NAME + " (" + VERSION_CODE + ")");
+        help = new TextView(this);
+        help.setText("正在读取 ChromeX 仓库稳定通道…");
         help.setTextSize(15f);
         help.setPadding(0, p / 2, 0, p / 2);
         box.addView(help);
@@ -77,77 +65,117 @@ public final class AluminiumInstallerActivity extends Activity {
         box.addView(state);
 
         install = new Button(this);
-        install.setText("一键安装 Aluminium 145");
+        install.setText("读取版本中…");
+        install.setEnabled(false);
         install.setOnClickListener(v -> beginInstall());
         box.addView(install);
 
-        Button refresh = new Button(this);
-        refresh.setText("刷新状态");
-        refresh.setOnClickListener(v -> refreshState());
+        refresh = new Button(this);
+        refresh.setText("刷新仓库版本与状态");
+        refresh.setOnClickListener(v -> refreshRemoteAndState());
         box.addView(refresh);
 
         setContentView(scroll);
-        refreshState();
+        refreshRemoteAndState();
     }
 
-    private void refreshState() {
+    private void refreshRemoteAndState() {
+        install.setEnabled(false);
+        refresh.setEnabled(false);
+        state.setText("读取远程 stable channel…");
+        new Thread(() -> {
+            try {
+                AluminiumReleaseCatalog.Release r = AluminiumReleaseCatalog.fetchStable();
+                target = r;
+                main.post(() -> {
+                    help.setText("从 ChromeX GitHub Release 下载 Google 原版 Aluminium Chrome 与匹配 Trichrome。\n"
+                            + "安装前校验文件大小、SHA-256、包名、版本号与 Google 证书；只使用 Root PackageManager 的降级能力，"
+                            + "不会全局关闭 Android 签名校验。\n\n仓库稳定版：" + r.versionName
+                            + " (" + r.versionCode + ")\nBuild：" + r.build + "\nRelease：" + r.tag);
+                    install.setText("一键安装 Aluminium " + major(r.versionName));
+                    install.setEnabled(true);
+                    refresh.setEnabled(true);
+                    refreshState(r);
+                });
+            } catch (Throwable t) {
+                target = null;
+                main.post(() -> {
+                    state.setText("远程版本读取失败：" + safeMessage(t)
+                            + "\n请检查网络或 aluminium-assets/channel.json");
+                    install.setText("远程版本不可用");
+                    install.setEnabled(false);
+                    refresh.setEnabled(true);
+                });
+            }
+        }, "ChromeX-AluminiumCatalog").start();
+    }
+
+    private void refreshState(AluminiumReleaseCatalog.Release r) {
         String chrome = packageVersion(CHROME_PACKAGE);
         String tri = packageVersion(TRICHROME_PACKAGE);
         state.setText("Root: " + (hasRoot() ? "可用" : "不可用")
                 + "\nChrome: " + chrome
                 + "\nTrichrome: " + tri
-                + "\n仓库资产: aluminium-145");
+                + "\n仓库目标: " + r.versionName + " · " + r.tag);
     }
 
     private void beginInstall() {
+        AluminiumReleaseCatalog.Release r = target;
+        if (r == null) {
+            Toast.makeText(this, "请先刷新远程版本", Toast.LENGTH_LONG).show();
+            return;
+        }
         if (!hasRoot()) {
             Toast.makeText(this, "未获得 Root，无法执行降级覆盖安装", Toast.LENGTH_LONG).show();
             return;
         }
         install.setEnabled(false);
-        state.setText("准备下载…");
+        refresh.setEnabled(false);
+        state.setText("准备下载 " + r.versionName + "…");
         new Thread(() -> {
-            File dir = new File(getCacheDir(), "aluminium145");
-            if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("无法创建缓存目录");
-            File chrome = new File(dir, CHROME_ASSET);
-            File tri = new File(dir, TRICHROME_ASSET);
+            String dirName = "aluminium-" + r.versionCode;
+            File dir = new File(getCacheDir(), dirName);
             try {
-                download(RELEASE_BASE + TRICHROME_ASSET, tri, "下载 Trichrome");
-                download(RELEASE_BASE + CHROME_ASSET, chrome, "下载 Chrome");
-                verifyArchive(tri, TRICHROME_PACKAGE, TRICHROME_SHA256, TRICHROME_CERT_SHA256);
-                verifyArchive(chrome, CHROME_PACKAGE, CHROME_SHA256, CHROME_CERT_SHA256);
+                if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("无法创建缓存目录");
+                File chrome = new File(dir, r.chrome.file);
+                File tri = new File(dir, r.trichrome.file);
+
+                download(r.releaseBase() + r.trichrome.file, tri, r.trichrome, "下载 Trichrome");
+                download(r.releaseBase() + r.chrome.file, chrome, r.chrome, "下载 Chrome");
+                verifyArchive(tri, r.trichrome, r);
+                verifyArchive(chrome, r.chrome, r);
                 verifyInstalledSignatureCompatibility(chrome, CHROME_PACKAGE);
                 verifyInstalledSignatureCompatibility(tri, TRICHROME_PACKAGE);
 
                 post("停止 Chrome…");
                 root("am force-stop " + CHROME_PACKAGE);
-                // Trichrome first, then Chrome. -r replaces; -d allows a signed downgrade.
-                post("安装 Trichrome 145…");
+                post("安装 Trichrome " + r.versionName + "…");
                 requireSuccess(root("pm install -r -d --user 0 " + shq(tri.getAbsolutePath())), "Trichrome 安装失败");
-                post("安装 Chrome Aluminium 145…");
+                post("安装 Chrome Aluminium " + r.versionName + "…");
                 requireSuccess(root("pm install -r -d --user 0 " + shq(chrome.getAbsolutePath())), "Chrome 安装失败");
 
-                requireVersion(TRICHROME_PACKAGE);
-                requireVersion(CHROME_PACKAGE);
-                post("安装成功：Chrome 与 Trichrome 均为 " + VERSION_NAME);
+                requireVersion(TRICHROME_PACKAGE, r);
+                requireVersion(CHROME_PACKAGE, r);
+                post("安装成功：Chrome 与 Trichrome 均为 " + r.versionName);
                 main.post(() -> {
                     install.setEnabled(true);
-                    refreshState();
-                    Toast.makeText(this, "Aluminium 145 安装完成，请重启 Chrome", Toast.LENGTH_LONG).show();
+                    refresh.setEnabled(true);
+                    refreshState(r);
+                    Toast.makeText(this, "Aluminium " + r.versionName + " 安装完成，请重启 Chrome", Toast.LENGTH_LONG).show();
                 });
             } catch (Throwable t) {
-                post("失败：" + t.getMessage());
-                main.post(() -> install.setEnabled(true));
-            } finally {
-                // Keep verified APKs in cache for retry; Android may clean cache later.
+                post("失败：" + safeMessage(t));
+                main.post(() -> {
+                    install.setEnabled(true);
+                    refresh.setEnabled(true);
+                });
             }
         }, "ChromeX-AluminiumInstaller").start();
     }
 
-    private void download(String url, File out, String label) throws Exception {
+    private void download(String url, File out, AluminiumReleaseCatalog.Asset asset, String label) throws Exception {
         if (out.isFile()) {
-            String expected = out.getName().startsWith("Chrome-") ? CHROME_SHA256 : TRICHROME_SHA256;
-            if (expected.equalsIgnoreCase(sha256(out))) return;
+            if (out.length() == asset.size && asset.sha256.equalsIgnoreCase(sha256(out))) return;
             //noinspection ResultOfMethodCallIgnored
             out.delete();
         }
@@ -159,11 +187,12 @@ public final class AluminiumInstallerActivity extends Activity {
         c.setRequestProperty("User-Agent", "ChromeX/" + BuildConfig.VERSION_NAME);
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new IllegalStateException(label + " HTTP " + code);
+        long total = c.getContentLengthLong();
+        if (total > 0 && total != asset.size) throw new SecurityException(label + " 文件大小与远程清单不一致");
         try (InputStream in = new BufferedInputStream(c.getInputStream());
              BufferedOutputStream os = new BufferedOutputStream(new FileOutputStream(out))) {
             byte[] buf = new byte[128 * 1024];
             long done = 0;
-            long total = c.getContentLengthLong();
             int n;
             long last = 0;
             while ((n = in.read(buf)) >= 0) {
@@ -171,33 +200,36 @@ public final class AluminiumInstallerActivity extends Activity {
                 done += n;
                 if (done - last >= 8L * 1024 * 1024) {
                     last = done;
-                    long pct = total > 0 ? done * 100 / total : -1;
+                    long pct = asset.size > 0 ? done * 100 / asset.size : -1;
                     post(label + (pct >= 0 ? " " + pct + "%" : " " + done / 1024 / 1024 + "MB"));
                 }
             }
         } finally {
             c.disconnect();
         }
+        if (out.length() != asset.size) throw new SecurityException(label + " 下载后文件大小不匹配");
     }
 
-    private void verifyArchive(File apk, String expectedPackage, String expectedHash, String expectedCert) throws Exception {
-        post("校验 " + expectedPackage + "…");
-        if (!expectedHash.equalsIgnoreCase(sha256(apk))) throw new SecurityException("APK SHA-256 不匹配: " + expectedPackage);
+    private void verifyArchive(File apk, AluminiumReleaseCatalog.Asset asset,
+                               AluminiumReleaseCatalog.Release release) throws Exception {
+        post("校验 " + asset.packageName + "…");
+        if (apk.length() != asset.size) throw new SecurityException("APK 大小不匹配: " + asset.packageName);
+        if (!asset.sha256.equalsIgnoreCase(sha256(apk))) throw new SecurityException("APK SHA-256 不匹配: " + asset.packageName);
         PackageManager pm = getPackageManager();
         PackageInfo pi = pm.getPackageArchiveInfo(apk.getAbsolutePath(), PackageManager.GET_SIGNING_CERTIFICATES);
-        if (pi == null) throw new SecurityException("无法解析 APK: " + expectedPackage);
-        if (!expectedPackage.equals(pi.packageName)) throw new SecurityException("包名错误: " + pi.packageName);
-        if (pi.getLongVersionCode() != VERSION_CODE || !VERSION_NAME.equals(pi.versionName)) {
+        if (pi == null) throw new SecurityException("无法解析 APK: " + asset.packageName);
+        if (!asset.packageName.equals(pi.packageName)) throw new SecurityException("包名错误: " + pi.packageName);
+        if (pi.getLongVersionCode() != release.versionCode || !release.versionName.equals(pi.versionName)) {
             throw new SecurityException("版本错误: " + pi.versionName + " (" + pi.getLongVersionCode() + ")");
         }
         String cert = archiveCertSha256(pi);
-        if (!expectedCert.equalsIgnoreCase(cert)) throw new SecurityException("Google 证书不匹配: " + expectedPackage);
+        if (!asset.certificateSha256.equalsIgnoreCase(cert)) throw new SecurityException("Google 证书不匹配: " + asset.packageName);
     }
 
-    private void verifyInstalledSignatureCompatibility(File target, String pkg) throws Exception {
+    private void verifyInstalledSignatureCompatibility(File targetFile, String pkg) throws Exception {
         try {
             PackageInfo installed = getPackageManager().getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES);
-            PackageInfo archive = getPackageManager().getPackageArchiveInfo(target.getAbsolutePath(), PackageManager.GET_SIGNING_CERTIFICATES);
+            PackageInfo archive = getPackageManager().getPackageArchiveInfo(targetFile.getAbsolutePath(), PackageManager.GET_SIGNING_CERTIFICATES);
             if (archive == null) return;
             String oldCert = archiveCertSha256(installed);
             String newCert = archiveCertSha256(archive);
@@ -205,7 +237,6 @@ public final class AluminiumInstallerActivity extends Activity {
                 throw new SecurityException(pkg + " 当前签名与 Aluminium 目标签名不同，拒绝绕过系统签名校验");
             }
         } catch (PackageManager.NameNotFoundException ignored) {
-            // Not installed: PackageManager will perform normal signature checks during install.
         }
     }
 
@@ -218,9 +249,9 @@ public final class AluminiumInstallerActivity extends Activity {
         return hex(MessageDigest.getInstance("SHA-256").digest(sigs[0].toByteArray()));
     }
 
-    private void requireVersion(String pkg) throws Exception {
+    private void requireVersion(String pkg, AluminiumReleaseCatalog.Release r) throws Exception {
         PackageInfo pi = getPackageManager().getPackageInfo(pkg, 0);
-        if (pi.getLongVersionCode() != VERSION_CODE || !VERSION_NAME.equals(pi.versionName)) {
+        if (pi.getLongVersionCode() != r.versionCode || !r.versionName.equals(pi.versionName)) {
             throw new IllegalStateException(pkg + " 安装后版本不匹配: " + pi.versionName);
         }
     }
@@ -236,8 +267,7 @@ public final class AluminiumInstallerActivity extends Activity {
 
     private boolean hasRoot() {
         try {
-            String out = root("id -u");
-            return out.trim().equals("0");
+            return root("id -u").trim().equals("0");
         } catch (Throwable ignored) {
             return false;
         }
@@ -280,6 +310,16 @@ public final class AluminiumInstallerActivity extends Activity {
         StringBuilder s = new StringBuilder(b.length * 2);
         for (byte x : b) s.append(String.format(Locale.ROOT, "%02x", x & 0xff));
         return s.toString();
+    }
+
+    private static String major(String versionName) {
+        int i = versionName.indexOf('.');
+        return i > 0 ? versionName.substring(0, i) : versionName;
+    }
+
+    private static String safeMessage(Throwable t) {
+        String m = t.getMessage();
+        return m == null || m.trim().isEmpty() ? t.getClass().getSimpleName() : m;
     }
 
     private void post(String text) {
