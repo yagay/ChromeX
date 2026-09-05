@@ -47,8 +47,13 @@ final class ChromiumProfile {
             return new ChromiumProfile(Family.CHROME_145, runtime.versionName, runtime.versionName,
                     500L, 600L, 6);
         }
+
         String engine = hooks == null
                 ? runtime.versionName : AdaptiveDexResolver.resolveProductVersion(runtime, hooks);
+        if (hooks != null && !ChromiumEngineVersionScanner.plausible(engine)) {
+            String scanned = ChromiumEngineVersionScanner.scan(runtime, hooks);
+            if (scanned != null) engine = scanned;
+        }
         return new ChromiumProfile(Family.ADAPTIVE, runtime.versionName, engine,
                 700L, 800L, 6);
     }
