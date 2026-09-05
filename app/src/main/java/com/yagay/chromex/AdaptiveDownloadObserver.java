@@ -1,7 +1,6 @@
 package com.yagay.chromex;
 
 import android.content.ContentResolver;
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.ContentObserver;
@@ -13,34 +12,36 @@ import android.provider.MediaStore;
 import android.widget.Toast;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Chrome-version-independent completion fallback for unknown builds. It observes completed rows in
- * MediaStore instead of reading obfuscated DownloadInfo fields. This is intentionally used only by
- * the adaptive profile so verified release profiles keep their lower-latency native completion path.
+ * Version-independent completion support. Stable DownloadController callbacks are preferred;
+ * MediaStore is retained as a fallback for builds/paths where those callbacks cannot be resolved.
  */
 final class AdaptiveDownloadObserver {
     private static final String APK_MIME = "application/vnd.android.package-archive";
     private static final long BANNER_WINDOW_MS = 4000L;
-    private static final long DEDUP_MS = 120_000L;
+    private static final long DEDUP_MS = 15_000L;
 
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "ChromeX-media-observer");
+        Thread t = new Thread(r, "ChromeX-adaptive-download");
         t.setDaemon(true);
         return t;
     });
-    private final Map<Long, Long> seen = new ConcurrentHashMap<>();
+    private final Map<String, Long> seen = new ConcurrentHashMap<>();
     private final AtomicLong suppressBannerUntil = new AtomicLong(0L);
+    private final AtomicInteger suppressBudget = new AtomicInteger();
     private final long startedAtSeconds = System.currentTimeMillis() / 1000L;
 
     AdaptiveDownloadObserver(ChromeRuntime runtime, HookSupport hooks, SharedPreferences prefs) {
@@ -51,6 +52,32 @@ final class AdaptiveDownloadObserver {
 
     void install() {
         installBannerSuppression();
+        installStableCompletionHook();
+        installMediaStoreFallback();
+    }
+
+    private void installStableCompletionHook() {
+        try {
+            Reflect.cls(runtime.classLoader, Chrome145.DOWNLOAD_CONTROLLER);
+            hooks.all(runtime.classLoader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
+                    "chromex:adaptive:download-completed", chain -> {
+                        Object info = findDownloadInfo(chain.getArgs().toArray());
+                        if (info != null) {
+                            String mime = stringAccessor(info, "getMimeType");
+                            String path = stringAccessor(info, "getFilePath");
+                            String name = stringAccessor(info, "getFileName");
+                            onCompleted(path, null, name, mime, "DownloadController");
+                        }
+                        return chain.proceed();
+                    });
+            hooks.info("adaptive DownloadController completion hook installed");
+        } catch (Throwable t) {
+            hooks.warn("adaptive DownloadController completion unavailable: "
+                    + t.getClass().getSimpleName());
+        }
+    }
+
+    private void installMediaStoreFallback() {
         try {
             ContentResolver resolver = runtime.application.getContentResolver();
             resolver.registerContentObserver(MediaStore.Downloads.EXTERNAL_CONTENT_URI, true,
@@ -60,19 +87,45 @@ final class AdaptiveDownloadObserver {
                             worker.execute(() -> inspect(uri));
                         }
                     });
-            hooks.info("adaptive download observer registered on MediaStore.Downloads");
+            hooks.info("adaptive MediaStore completion fallback registered");
         } catch (Throwable t) {
             hooks.error("adaptive MediaStore observer", t);
         }
     }
 
     private void installBannerSuppression() {
-        Method message = DexKitResolver.resolveDownloadMessageMethod(runtime, hooks);
-        if (message == null) return;
-        hooks.method(message, "chromex:adaptive:download-banner", chain -> {
-            if (suppressBannerUntil.get() >= System.currentTimeMillis()) return null;
-            return chain.proceed();
-        });
+        Method anchor = DexKitResolver.resolveDownloadMessageMethod(runtime, hooks);
+        if (anchor == null) return;
+        try {
+            Class<?> offlineItem = Reflect.cls(runtime.classLoader, Chrome145.OFFLINE_ITEM);
+            Class<?> owner = anchor.getDeclaringClass();
+            int installed = 0;
+            for (Method method : owner.getDeclaredMethods()) {
+                if (Modifier.isStatic(method.getModifiers())) continue;
+                Class<?>[] p = method.getParameterTypes();
+                if (p.length == 0 || p[0] != offlineItem) continue;
+                method.setAccessible(true);
+                String id = "chromex:adaptive:download-banner:" + method.getName() + ":" + installed;
+                hooks.method(method, id, chain -> {
+                    if (suppressBannerUntil.get() >= System.currentTimeMillis()
+                            && takeSuppressionBudget()) return null;
+                    return chain.proceed();
+                });
+                installed++;
+            }
+            hooks.info("adaptive download banner owner covered: " + owner.getName()
+                    + " methods=" + installed);
+        } catch (Throwable t) {
+            hooks.warn("adaptive banner owner expansion failed: " + t.getClass().getSimpleName());
+        }
+    }
+
+    private boolean takeSuppressionBudget() {
+        while (true) {
+            int value = suppressBudget.get();
+            if (value <= 0) return false;
+            if (suppressBudget.compareAndSet(value, value - 1)) return true;
+        }
     }
 
     private void inspect(Uri changed) {
@@ -102,11 +155,9 @@ final class AdaptiveDownloadObserver {
                 long modified = cursor.getLong(5);
                 if (!Chrome145.PACKAGE.equals(owner) || pending != 0) continue;
                 if (modified + 3 < startedAtSeconds) continue;
-                if (!markSeen(id)) continue;
-
                 Uri item = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                         Long.toString(id));
-                onCompleted(item, name, mime);
+                onCompleted(null, item, name, mime, "MediaStore");
             }
         } catch (Throwable t) {
             hooks.warn("adaptive MediaStore inspect failed: " + t.getClass().getSimpleName());
@@ -115,28 +166,57 @@ final class AdaptiveDownloadObserver {
         }
     }
 
-    private boolean markSeen(long id) {
-        long now = System.currentTimeMillis();
-        Long old = seen.putIfAbsent(id, now);
-        if (old != null && now - old < DEDUP_MS) return false;
-        seen.put(id, now);
-        if (seen.size() > 128) {
-            seen.entrySet().removeIf(e -> now - e.getValue() > DEDUP_MS);
-        }
-        return true;
-    }
+    private void onCompleted(String path, Uri knownUri, String name, String mime, String source) {
+        String key = name == null || name.isBlank()
+                ? (path == null ? String.valueOf(knownUri) : path) : name;
+        if (!markSeen(key)) return;
 
-    private void onCompleted(Uri uri, String name, String mime) {
-        boolean apk = isApk(mime, name);
+        boolean apk = isApk(mime, name != null ? name : path);
         boolean toast = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
                 || (apk && Config.get(prefs, Config.APK_TOAST));
         if (toast) {
             suppressBannerUntil.set(System.currentTimeMillis() + BANNER_WINDOW_MS);
+            suppressBudget.set(4);
             showToast(name == null || name.isBlank() ? "下载文件" : name);
         }
         if (apk && Config.get(prefs, Config.AUTO_INSTALL_APK)) {
+            Uri uri = knownUri;
+            if (!InstallerUriResolver.isContent(uri)) {
+                InstallerUriResolver.Result resolved = InstallerUriResolver.resolve(
+                        runtime.application, runtime.classLoader, path, name);
+                if (resolved.uri != null) uri = resolved.uri;
+                else {
+                    hooks.warn("adaptive APK installer unresolved from " + source
+                            + ": " + resolved.detail);
+                    return;
+                }
+            }
             launchInstaller(uri, name == null ? uri.toString() : name);
         }
+    }
+
+    private boolean markSeen(String key) {
+        long now = System.currentTimeMillis();
+        Long old = seen.put(key, now);
+        if (old != null && now - old < DEDUP_MS) return false;
+        if (seen.size() > 128) seen.entrySet().removeIf(e -> now - e.getValue() > DEDUP_MS);
+        return true;
+    }
+
+    private Object findDownloadInfo(Object[] args) {
+        try {
+            Class<?> type = Reflect.cls(runtime.classLoader, Chrome145.DOWNLOAD_INFO);
+            for (Object arg : args) if (arg != null && type.isAssignableFrom(arg.getClass())) return arg;
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static String stringAccessor(Object value, String getter) {
+        if (value == null) return null;
+        try {
+            Object result = Reflect.call(value, getter);
+            return result instanceof String ? (String) result : null;
+        } catch (Throwable ignored) { return null; }
     }
 
     private void showToast(String name) {
@@ -151,6 +231,10 @@ final class AdaptiveDownloadObserver {
     }
 
     private void launchInstaller(Uri uri, String name) {
+        if (!InstallerUriResolver.isContent(uri)) {
+            hooks.warn("adaptive installer refused non-content URI");
+            return;
+        }
         main.post(() -> {
             try {
                 Intent intent = new Intent(Intent.ACTION_VIEW)
