@@ -2,6 +2,7 @@ package com.yagay.chromex;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -77,7 +78,9 @@ final class OfflineContentLifecycleBinding {
         Method method = bindings == null ? null : bindings.offlineContentOpenItem;
         Object bridge = bridgeInstance;
         Object id = OfflineItemAccessor.contentId(offlineItem);
-        if (method == null || bridge == null || id == null) return false;
+        if (method == null || bridge == null || id == null || !hasLiveNativePointer(bridge)) {
+            return false;
+        }
         try {
             Class<?> paramsType = Reflect.cls(runtime.classLoader, OPEN_PARAMS);
             Object params = Reflect.construct(paramsType, 0); // LaunchLocation.DOWNLOAD_HOME.
@@ -89,6 +92,27 @@ final class OfflineContentLifecycleBinding {
             hooks.warn("OfflineContent openItem unavailable: " + t.getClass().getSimpleName());
             return false;
         }
+    }
+
+    /** Bridge has one native pointer in stock Chromium; ambiguous long fields fail closed. */
+    private static boolean hasLiveNativePointer(Object bridge) {
+        if (bridge == null) return false;
+        Long candidate = null;
+        Class<?> type = bridge.getClass();
+        while (type != null && type != Object.class) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType() != long.class) continue;
+                try {
+                    field.setAccessible(true);
+                    long value = field.getLong(bridge);
+                    if (field.getName().toLowerCase().contains("native")) return value != 0L;
+                    if (candidate != null) return false;
+                    candidate = value;
+                } catch (Throwable ignored) {}
+            }
+            type = type.getSuperclass();
+        }
+        return candidate != null && candidate != 0L;
     }
 
     private void snapshotLists(Object[] args) {
