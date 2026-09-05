@@ -1,5 +1,6 @@
 package com.yagay.chromex;
 
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
@@ -8,7 +9,6 @@ import android.os.Looper;
 import android.widget.Toast;
 
 import java.io.File;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -17,16 +17,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Shared completion/Toast/APK-installer/banner/translate feature for Chromium profiles. */
+/** Shared completion/Toast/file-open/banner/translate feature for Chromium profiles. */
 final class ChromiumDownloadCompletionHooks {
     private static final String APK_MIME = "application/vnd.android.package-archive";
     private static final long COMPLETION_SETTLE_MS = 750L;
     private static final long COMPLETION_DEDUP_MS = 3000L;
     private static final long BANNER_WINDOW_MS = 3500L;
     private static final long TOAST_DEDUP_MS = 3000L;
-    private static final long INSTALL_DEDUP_MS = 90_000L;
-    private static final long INSTALL_WAIT_MS = 20_000L;
-    private static final long INSTALL_POLL_MS = 500L;
+    private static final long OPEN_DEDUP_MS = 15_000L;
+    private static final long OPEN_WAIT_MS = 20_000L;
+    private static final long OPEN_POLL_MS = 500L;
 
     private final ChromiumProfile profile;
     private final ChromeRuntime runtime;
@@ -39,9 +39,9 @@ final class ChromiumDownloadCompletionHooks {
     private final AtomicInteger suppressBudget = new AtomicInteger();
     private final AtomicLong lastToastAt = new AtomicLong();
     private final AtomicReference<String> lastToastName = new AtomicReference<>("");
-    private final AtomicReference<InstallStamp> lastInstall = new AtomicReference<>();
-    private final ExecutorService installerWorker = Executors.newSingleThreadExecutor(r -> {
-        Thread thread = new Thread(r, "ChromeX-installer");
+    private final AtomicReference<OpenStamp> lastOpen = new AtomicReference<>();
+    private final ExecutorService fileOpenWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "ChromeX-file-open");
         thread.setDaemon(true);
         return thread;
     });
@@ -83,7 +83,8 @@ final class ChromiumDownloadCompletionHooks {
         try {
             DownloadArtifact artifact = artifact(info);
             if (artifact == null || !markCompletion(artifact.key())) return;
-            boolean apk = isApk(artifact.mime, artifact.name != null ? artifact.name : artifact.path);
+            String nameOrPath = artifact.name != null ? artifact.name : artifact.path;
+            boolean apk = DownloadAutoOpenPolicy.isApk(artifact.mime, nameOrPath);
             boolean replaceBanner = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
                     || (apk && Config.get(prefs, Config.APK_TOAST));
             if (replaceBanner) {
@@ -91,11 +92,15 @@ final class ChromiumDownloadCompletionHooks {
                 suppressBudget.set(4);
                 showToastOnce(artifact.displayName());
             }
-            if (apk && Config.get(prefs, Config.AUTO_INSTALL_APK)) {
-                enqueueInstall(artifact.path, artifact.name);
+
+            DownloadAutoOpenPolicy.Match match = DownloadAutoOpenPolicy.match(
+                    prefs, artifact.mime, nameOrPath);
+            if (match != null) {
+                enqueueOpen(artifact.path, artifact.name, match);
             }
             hooks.info("download completion normalized through shared pipeline: "
-                    + artifact.displayName() + " source=" + simpleName(source));
+                    + artifact.displayName() + " source=" + simpleName(source)
+                    + (match == null ? "" : " autoOpen=" + match.category));
         } catch (Throwable t) {
             hooks.error("shared download completion", t);
         }
@@ -131,10 +136,10 @@ final class ChromiumDownloadCompletionHooks {
         return null;
     }
 
+    /** Keep Chrome's manual open path aligned with the selected auto-open policy. */
     private void installOpenDownload() {
         hooks.all(loader, Chrome145.DOWNLOAD_UTILS, "openDownload",
-                "chromex:download:open-apk", chain -> {
-                    if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return chain.proceed();
+                "chromex:download:open-selected", chain -> {
                     Object[] args = chain.getArgs().toArray();
                     if (args.length < 2) return chain.proceed();
                     String path = string(args[0]);
@@ -145,13 +150,19 @@ final class ChromiumDownloadCompletionHooks {
                         path = logical;
                         name = new File(logical).getName();
                     }
-                    if (!isApk(mime, name != null ? name : path)) return chain.proceed();
+                    DownloadAutoOpenPolicy.Match match = DownloadAutoOpenPolicy.match(
+                            prefs, mime, name != null ? name : path);
+                    if (match == null) return chain.proceed();
                     String fileName = normalizedName(name, path);
                     InstallerUriResolver.Result resolved = InstallerUriResolver.resolve(
                             runtime.application, loader, path, fileName);
-                    if (resolved.uri != null && launchInstallerNow(resolved.uri, fileName)) return null;
+                    if (resolved.uri != null
+                            && launchFileNow(resolved.uri, match.mime, fileName, match.category)) {
+                        return null;
+                    }
                     if (resolved.terminal) {
-                        hooks.warn(profile.label() + " APK open blocked safely: " + resolved.detail);
+                        hooks.warn(profile.label() + " selected file open blocked safely: "
+                                + resolved.detail);
                     }
                     return chain.proceed();
                 });
@@ -256,7 +267,8 @@ final class ChromiumDownloadCompletionHooks {
         }
         DownloadArtifact artifact = new DownloadArtifact(path, name, mime);
         if (!markCompletion(artifact.key())) return;
-        boolean apk = isApk(mime, name != null ? name : path);
+        String nameOrPath = name != null ? name : path;
+        boolean apk = DownloadAutoOpenPolicy.isApk(mime, nameOrPath);
         boolean replaceBanner = Config.get(prefs, Config.ALL_DOWNLOAD_TOAST)
                 || (apk && Config.get(prefs, Config.APK_TOAST));
         if (replaceBanner) {
@@ -264,7 +276,8 @@ final class ChromiumDownloadCompletionHooks {
             suppressBudget.set(4);
             showToastOnce(artifact.displayName());
         }
-        if (apk && Config.get(prefs, Config.AUTO_INSTALL_APK)) enqueueInstall(path, name);
+        DownloadAutoOpenPolicy.Match match = DownloadAutoOpenPolicy.match(prefs, mime, nameOrPath);
+        if (match != null) enqueueOpen(path, name, match);
     }
 
     private boolean markCompletion(String key) {
@@ -277,13 +290,13 @@ final class ChromiumDownloadCompletionHooks {
         return true;
     }
 
-    private void enqueueInstall(String path, String name) {
+    private void enqueueOpen(String path, String name, DownloadAutoOpenPolicy.Match match) {
         String fileName = normalizedName(name, path);
-        if (fileName == null) return;
-        installerWorker.execute(() -> {
-            long deadline = System.currentTimeMillis() + INSTALL_WAIT_MS;
+        if (fileName == null || match == null) return;
+        fileOpenWorker.execute(() -> {
+            long deadline = System.currentTimeMillis() + OPEN_WAIT_MS;
             while (System.currentTimeMillis() < deadline) {
-                if (!Config.get(prefs, Config.AUTO_INSTALL_APK)) return;
+                if (!Config.get(prefs, match.configKey)) return;
                 String logical = DownloadNormalizationRegistry.logicalPath(path);
                 String candidatePath = logical == null ? path : logical;
                 String candidateName = logical == null ? fileName : new File(logical).getName();
@@ -291,46 +304,65 @@ final class ChromiumDownloadCompletionHooks {
                         runtime.application, loader, candidatePath, candidateName);
                 if (resolved.uri != null) {
                     Uri uri = resolved.uri;
-                    main.post(() -> launchInstallerNow(uri, candidateName));
+                    main.post(() -> launchFileNow(uri, match.mime, candidateName, match.category));
                     return;
                 }
                 if (resolved.terminal) {
-                    hooks.warn(profile.label() + " APK installer stopped: " + candidateName
-                            + " :: " + resolved.detail);
+                    hooks.warn(profile.label() + " auto-open stopped: " + candidateName
+                            + " category=" + match.category + " :: " + resolved.detail);
                     return;
                 }
                 try {
-                    Thread.sleep(INSTALL_POLL_MS);
+                    Thread.sleep(OPEN_POLL_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
                 }
             }
-            hooks.warn(profile.label() + " APK not resolvable after 20s: " + fileName);
+            hooks.warn(profile.label() + " file not resolvable after 20s: " + fileName
+                    + " category=" + match.category);
         });
     }
 
-    private boolean launchInstallerNow(Uri uri, String key) {
+    private boolean launchFileNow(Uri uri, String mime, String key, String category) {
         if (!InstallerUriResolver.isContent(uri)) return false;
+        String safeMime = mime == null || mime.isBlank() ? "application/octet-stream" : mime;
         long now = System.currentTimeMillis();
-        String safeKey = key == null ? uri.toString() : key;
-        InstallStamp previous = lastInstall.get();
+        String safeKey = (key == null ? uri.toString() : key) + "|" + safeMime;
+        OpenStamp previous = lastOpen.get();
         if (previous != null && previous.key.equals(safeKey)
-                && now - previous.time < INSTALL_DEDUP_MS) return true;
-        InstallStamp next = new InstallStamp(safeKey, now);
-        lastInstall.set(next);
+                && now - previous.time < OPEN_DEDUP_MS) return true;
+        OpenStamp next = new OpenStamp(safeKey, now);
+        lastOpen.set(next);
         try {
             Intent intent = new Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, APK_MIME)
+                    .setDataAndType(uri, safeMime)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
             runtime.application.startActivity(intent);
-            hooks.info(profile.label() + " APK installer launched: " + safeKey);
+            hooks.info(profile.label() + " file opened: " + safeKey + " category=" + category);
             return true;
+        } catch (ActivityNotFoundException e) {
+            lastOpen.compareAndSet(next, previous);
+            hooks.warn(profile.label() + " no handler for " + safeMime + " file=" + key);
+            showOpenFailure(key, "没有找到可打开此文件的应用");
+            return false;
         } catch (Throwable t) {
-            lastInstall.compareAndSet(next, previous);
-            hooks.error(profile.label() + " launch APK installer", t);
+            lastOpen.compareAndSet(next, previous);
+            hooks.error(profile.label() + " launch downloaded file", t);
+            showOpenFailure(key, "自动打开失败");
             return false;
         }
+    }
+
+    private void showOpenFailure(String name, String message) {
+        main.post(() -> {
+            try {
+                String safe = name == null || name.isBlank() ? "下载文件" : name;
+                Toast.makeText(runtime.application, message + ": " + safe, Toast.LENGTH_LONG).show();
+            } catch (Throwable t) {
+                hooks.error("show auto-open failure", t);
+            }
+        });
     }
 
     private void showToastOnce(String name) {
@@ -379,11 +411,6 @@ final class ChromiumDownloadCompletionHooks {
         return value instanceof String ? (String) value : null;
     }
 
-    private static boolean isApk(String mime, String name) {
-        if (mime != null && mime.toLowerCase(Locale.ROOT).contains("package-archive")) return true;
-        return name != null && name.toLowerCase(Locale.ROOT).endsWith(".apk");
-    }
-
     private static String normalizedName(String name, String path) {
         String value = name;
         if (value == null || value.isBlank()) value = path;
@@ -421,10 +448,11 @@ final class ChromiumDownloadCompletionHooks {
         }
     }
 
-    private static final class InstallStamp {
+    private static final class OpenStamp {
         final String key;
         final long time;
-        InstallStamp(String key, long time) {
+
+        OpenStamp(String key, long time) {
             this.key = key;
             this.time = time;
         }
