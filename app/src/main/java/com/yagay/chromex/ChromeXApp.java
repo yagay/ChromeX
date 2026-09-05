@@ -34,9 +34,11 @@ public final class ChromeXApp extends Application implements XposedServiceHelper
         super.onCreate();
         try {
             int write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-            int readWrite = Intent.FLAG_GRANT_READ_URI_PERMISSION | write;
+            int readWritePrefix = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | write | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
             grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.URI, write);
-            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.CACHE_URI, readWrite);
+            // Cache reads use content://.../cache/<build-key>, so grant the cache URI as a prefix.
+            grantUriPermission(Chrome145.PACKAGE, DiagnosticProvider.CACHE_URI, readWritePrefix);
         } catch (Throwable ignored) {}
         XposedServiceHelper.registerListener(this);
     }
