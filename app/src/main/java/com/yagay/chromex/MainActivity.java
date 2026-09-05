@@ -16,7 +16,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 import io.github.libxposed.service.XposedService;
@@ -38,10 +40,24 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
             {Config.BYPASS_POLICY, "跳过下载策略提示"},
             {Config.BYPASS_LOCATION, "跳过保存位置/重命名确认"},
             {Config.BYPASS_OPEN, "跳过打开文件确认"},
-            {Config.AUTO_INSTALL_APK, "APK 下载完成后打开安装器"},
             {Config.APK_TOAST, "APK 下载完成改用 Toast"},
             {Config.ALL_DOWNLOAD_TOAST, "所有下载完成改用 Toast"},
             {Config.HIDE_TRANSLATE, "隐藏翻译横幅"}
+    };
+
+    private static final String[][] AUTO_OPEN_ITEMS = {
+            {Config.AUTO_OPEN_APK, "APK（.apk，系统安装器）"},
+            {Config.AUTO_OPEN_APP_BUNDLE, "应用安装包（.apks / .apkm / .xapk）"},
+            {Config.AUTO_OPEN_PDF, "PDF（.pdf）"},
+            {Config.AUTO_OPEN_ARCHIVE, "压缩包（ZIP / RAR / 7Z / TAR / GZ 等）"},
+            {Config.AUTO_OPEN_DOCUMENT, "文档（DOC / DOCX / ODT / RTF）"},
+            {Config.AUTO_OPEN_SPREADSHEET, "表格（XLS / XLSX / ODS / CSV）"},
+            {Config.AUTO_OPEN_PRESENTATION, "演示文稿（PPT / PPTX / ODP）"},
+            {Config.AUTO_OPEN_TEXT, "文本（TXT / MD / JSON / XML / YAML / LOG 等）"},
+            {Config.AUTO_OPEN_IMAGE, "图片（JPG / PNG / WEBP / HEIC / AVIF 等）"},
+            {Config.AUTO_OPEN_VIDEO, "视频（MP4 / MKV / WEBM / MOV 等）"},
+            {Config.AUTO_OPEN_AUDIO, "音频（MP3 / M4A / FLAC / WAV / OPUS 等）"},
+            {Config.AUTO_OPEN_EBOOK, "电子书（EPUB / MOBI / AZW3 / FB2）"}
     };
 
     @Override
@@ -114,10 +130,11 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         status.setText("已连接 · API " + service.getApiVersion()
                 + " · 作用域 " + service.getScope() + "\n");
         for (String[] item : ITEMS) addSwitch(item[0], item[1]);
+        addAutoOpenSection();
         addDiagnosticsSection();
     }
 
-    private void addSwitch(String key, String label) {
+    private Switch addSwitch(String key, String label) {
         Switch sw = new Switch(this);
         sw.setText(label);
         sw.setTextSize(16f);
@@ -129,6 +146,61 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         });
         content.addView(sw, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return sw;
+    }
+
+    private void addAutoOpenSection() {
+        TextView heading = new TextView(this);
+        heading.setText("下载完成后自动打开");
+        heading.setTextSize(20f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setPadding(0, dp(20), 0, dp(4));
+        content.addView(heading);
+
+        TextView help = new TextView(this);
+        help.setText("可多选。仅勾选的文件类型会在下载真正完成后自动打开；"
+                + "使用 MIME + 扩展名双重识别。没有对应应用时只提示，不会导致 Chrome 崩溃。\n"
+                + "APK 继续交给系统安装器；APKS/APKM/XAPK 会交给支持该格式的应用。");
+        help.setTextSize(14f);
+        help.setPadding(0, 0, 0, dp(6));
+        content.addView(help);
+
+        List<Switch> switches = new ArrayList<>();
+        for (String[] item : AUTO_OPEN_ITEMS) switches.add(addSwitch(item[0], item[1]));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(4), 0, dp(4));
+
+        Button selectAll = new Button(this);
+        selectAll.setText("全选");
+        selectAll.setOnClickListener(v -> setAllAutoOpenTypes(true, switches));
+        actions.addView(selectAll, weightedButtonParams());
+
+        Button clear = new Button(this);
+        clear.setText("清空");
+        clear.setOnClickListener(v -> setAllAutoOpenTypes(false, switches));
+        actions.addView(clear, weightedButtonParams());
+
+        content.addView(actions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void setAllAutoOpenTypes(boolean enabled, List<Switch> switches) {
+        if (prefs == null) return;
+        SharedPreferences.Editor editor = prefs.edit();
+        for (String key : Config.AUTO_OPEN_KEYS) editor.putBoolean(key, enabled);
+        editor.apply();
+        for (Switch sw : switches) sw.setChecked(enabled);
+        Toast.makeText(this, enabled ? "已全选自动打开类型" : "已清空自动打开类型",
+                Toast.LENGTH_SHORT).show();
+    }
+
+    private LinearLayout.LayoutParams weightedButtonParams() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        p.setMarginEnd(dp(4));
+        return p;
     }
 
     private void addDiagnosticsSection() {
