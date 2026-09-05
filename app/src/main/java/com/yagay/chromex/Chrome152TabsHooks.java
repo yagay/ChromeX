@@ -6,16 +6,15 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 
-import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-/** Single verified tab/homepage implementation for Chrome 152.0.7977.75. */
+/** Verified tab/homepage implementation for Chrome 152.0.7977.75. */
 final class Chrome152TabsHooks {
-    private static final long COLD_DELAY_MS = 1500L;
-    private static final long RETRY_DELAY_MS = 1000L;
-    private static final int MAX_ROUNDS = 4;
+    private static final long COLD_DELAY_MS = 350L;
+    private static final long RETRY_DELAY_MS = 500L;
+    private static final int MAX_ROUNDS = 6;
 
     private final ClassLoader loader;
     private final HookSupport hooks;
@@ -55,8 +54,6 @@ final class Chrome152TabsHooks {
                     return result;
                 });
 
-        // Chrome 152 declares this method directly. It is a much better user-exit signal than the
-        // inherited ud4#onDestroy path and runs before task teardown.
         hooks.exact(loader, Chrome145.ACTIVITY, "moveTaskToBack",
                 new Class<?>[]{boolean.class}, "chromex152:tabs:exit-back", chain -> {
                     Object receiver = chain.getThisObject();
@@ -66,8 +63,6 @@ final class Chrome152TabsHooks {
                     return chain.proceed();
                 });
 
-        // Lifecycle fallback. Reflect.exact reaches inherited ud4#onDestroy, so guard the receiver
-        // to ChromeTabbedActivity and perform cleanup before chain.proceed() while native state lives.
         hooks.exact(loader, Chrome145.ACTIVITY, "onDestroy", new Class<?>[0],
                 "chromex152:tabs:exit-destroy", chain -> {
                     Object receiver = chain.getThisObject();
@@ -82,23 +77,19 @@ final class Chrome152TabsHooks {
                 });
     }
 
-    private boolean isChromeTabbedActivity(Activity activity) {
-        try {
-            return Reflect.cls(loader, Chrome145.ACTIVITY).isInstance(activity);
-        } catch (Throwable ignored) {
-            return Chrome145.ACTIVITY.equals(activity.getClass().getName());
-        }
-    }
-
     private void cleanupForExit(Activity activity, String reason) {
         try {
             Object selector = selector(activity);
+            boolean restoreSuppressed = true;
             if (selector != null) {
-                closeAll(selectModel(selector, false));
-                closeAll(selectModel(selector, true));
+                restoreSuppressed &= TabCloseStrategy.closeAll(
+                        loader, selectModel(selector, false), hooks, true);
+                restoreSuppressed &= TabCloseStrategy.closeAll(
+                        loader, selectModel(selector, true), hooks, true);
             }
-            history.clear(activity, "exit-" + reason);
-            hooks.info("Chrome 152 exit tab cleanup applied via " + reason);
+            if (!restoreSuppressed) history.clear(activity, "exit-fallback-" + reason);
+            hooks.info("Chrome 152 exit tab cleanup applied via " + reason
+                    + " restoreSuppressed=" + restoreSuppressed);
         } catch (Throwable t) {
             hooks.error("Chrome 152 exit cleanup via " + reason, t);
         }
@@ -150,9 +141,7 @@ final class Chrome152TabsHooks {
     private void scheduleColdStart(Activity activity) {
         if (!Config.get(prefs, Config.CLEAN_START)) return;
         Intent intent = activity.getIntent();
-        if (intent == null || !Intent.ACTION_MAIN.equals(intent.getAction()) || intent.getData() != null) {
-            return;
-        }
+        if (intent == null || !Intent.ACTION_MAIN.equals(intent.getAction()) || intent.getData() != null) return;
         synchronized (handled) {
             if (!handled.add(activity)) return;
         }
@@ -183,15 +172,19 @@ final class Chrome152TabsHooks {
                 return;
             }
 
-            closeEverythingExcept(regular, keep);
+            boolean restoreSuppressed = TabCloseStrategy.closeExcept(
+                    loader, regular, keep, hooks, false);
             Object incognito = selectModel(selector, true);
-            if (incognito != null && incognito != regular) closeAll(incognito);
+            if (incognito != null && incognito != regular) {
+                restoreSuppressed &= TabCloseStrategy.closeAll(loader, incognito, hooks, false);
+            }
 
             if (count(regular) <= 1 || round + 1 >= MAX_ROUNDS) {
-                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS)) {
-                    history.clear(activity, "cold-start");
+                if (Config.get(prefs, Config.CLEAR_CLOSED_TABS) && !restoreSuppressed) {
+                    history.clear(activity, "cold-start-fallback");
                 }
-                hooks.info("Chrome 152 cold start settled on configured homepage at round " + round);
+                hooks.info("Chrome 152 cold start settled on configured homepage at round " + round
+                        + " restoreSuppressed=" + restoreSuppressed);
             } else {
                 retry(activity, round);
             }
@@ -222,10 +215,8 @@ final class Chrome152TabsHooks {
             Object value = Reflect.get(activity, Chrome152.ACTIVITY_SELECTOR_FIELD);
             if (value != null) return value;
         } catch (Throwable ignored) {}
-        try {
-            return Reflect.findFieldValueByType(activity,
-                    Reflect.cls(loader, Chrome152.TAB_SELECTOR));
-        } catch (Throwable ignored) { return null; }
+        try { return Reflect.findFieldValueByType(activity, Reflect.cls(loader, Chrome152.TAB_SELECTOR)); }
+        catch (Throwable ignored) { return null; }
     }
 
     private Object selectModel(Object selector, boolean incognito) {
@@ -247,37 +238,10 @@ final class Chrome152TabsHooks {
         return null;
     }
 
-    private void closeEverythingExcept(Object model, Object keep) {
-        for (int i = count(model) - 1; i >= 0; i--) {
-            Object tab = tabAt(model, i);
-            if (tab != null && tab != keep) closeTab(model, tab);
-        }
-    }
-
-    private void closeAll(Object model) {
-        if (model == null) return;
-        try {
-            Reflect.call(model, "forceCloseAllTabs");
-            return;
-        } catch (Throwable ignored) {}
-        for (int i = count(model) - 1; i >= 0; i--) {
-            Object tab = tabAt(model, i);
-            if (tab != null) closeTab(model, tab);
-        }
-    }
-
-    private void closeTab(Object model, Object tab) {
-        try {
-            Class<?> tabType = Reflect.cls(loader, "org.chromium.chrome.browser.tab.Tab");
-            Method method = Reflect.exact(model.getClass(), "closeTab", tabType);
-            method.invoke(model, tab);
-        } catch (Throwable ignored) {}
-    }
-
     private int count(Object model) {
         try {
             Object value = Reflect.call(model, "getCount");
-            return value instanceof Integer ? (Integer) value : 0;
+            return value instanceof Number ? ((Number) value).intValue() : 0;
         } catch (Throwable ignored) { return 0; }
     }
 
@@ -299,6 +263,11 @@ final class Chrome152TabsHooks {
             } catch (Throwable ignored) {}
         }
         return null;
+    }
+
+    private boolean isChromeTabbedActivity(Activity activity) {
+        try { return Reflect.cls(loader, Chrome145.ACTIVITY).isInstance(activity); }
+        catch (Throwable ignored) { return Chrome145.ACTIVITY.equals(activity.getClass().getName()); }
     }
 
     private static boolean isNtp(String value) {
