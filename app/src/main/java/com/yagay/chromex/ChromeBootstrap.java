@@ -12,11 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedModule;
 
-/**
- * Waits until Chrome's isolated `chrome` split is actually attached, then hands the real split
- * ClassLoader to feature installation. PackageReadyParam only describes the loader at one point in
- * time and Chrome replaces/extends its loader while SplitChromeApplication is starting.
- */
+/** Waits until Chrome's isolated browser split is actually attached. */
 final class ChromeBootstrap {
     interface ReadyCallback {
         void onReady(ChromeRuntime runtime);
@@ -89,7 +85,7 @@ final class ChromeBootstrap {
     private void tryReady(Application app, String reason) {
         if (delivered.get()) return;
         ClassLoader loader = resolveChromeLoader(app);
-        if (loader == null || !hasChromeBrowserClasses(loader)) return;
+        if (loader == null || !hasBrowserAnchor(loader)) return;
         if (!delivered.compareAndSet(false, true)) return;
 
         String splitPath = findChromeSplitPath(applicationInfo);
@@ -98,6 +94,7 @@ final class ChromeBootstrap {
                 + ", version=" + runtime.versionName
                 + ", loader=" + loader.getClass().getName()
                 + ", split=" + (splitPath == null ? "unknown" : splitPath));
+        RuntimeDiagnostics.flushPendingIfPossible();
         try {
             callback.onReady(runtime);
         } catch (Throwable t) {
@@ -106,7 +103,6 @@ final class ChromeBootstrap {
     }
 
     private ClassLoader resolveChromeLoader(Application app) {
-        // Isolated split context is the most deterministic source when Chrome uses split_chrome.apk.
         String[] splitNames = applicationInfo == null ? null : applicationInfo.splitNames;
         if (splitNames != null) {
             for (String splitName : splitNames) {
@@ -114,32 +110,33 @@ final class ChromeBootstrap {
                 try {
                     Context split = app.createContextForSplit(splitName);
                     ClassLoader loader = split.getClassLoader();
-                    if (loader != null && hasChromeBrowserClasses(loader)) return loader;
+                    if (loader != null && hasBrowserAnchor(loader)) return loader;
                 } catch (Throwable ignored) {}
             }
         }
 
-        // Most current Chrome builds use the literal split name "chrome".
         try {
             Context split = app.createContextForSplit("chrome");
             ClassLoader loader = split.getClassLoader();
-            if (loader != null && hasChromeBrowserClasses(loader)) return loader;
+            if (loader != null && hasBrowserAnchor(loader)) return loader;
         } catch (Throwable ignored) {}
 
-        // SplitChromeApplication may replace the Application loader after preload finishes.
         try {
             ClassLoader loader = app.getClassLoader();
-            if (loader != null && hasChromeBrowserClasses(loader)) return loader;
+            if (loader != null && hasBrowserAnchor(loader)) return loader;
         } catch (Throwable ignored) {}
 
-        if (initialLoader != null && hasChromeBrowserClasses(initialLoader)) return initialLoader;
+        if (initialLoader != null && hasBrowserAnchor(initialLoader)) return initialLoader;
         return null;
     }
 
-    private boolean hasChromeBrowserClasses(ClassLoader loader) {
+    /**
+     * Bootstrap only verifies the browser split itself. Download/translate/etc. classes are feature
+     * dependencies and must be allowed to fail independently on future Chrome builds.
+     */
+    private boolean hasBrowserAnchor(ClassLoader loader) {
         try {
             Class.forName(Chrome145.ACTIVITY, false, loader);
-            Class.forName(Chrome145.DOWNLOAD_CONTROLLER, false, loader);
             return true;
         } catch (Throwable ignored) {
             return false;
