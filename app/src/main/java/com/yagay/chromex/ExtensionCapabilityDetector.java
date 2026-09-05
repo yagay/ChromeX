@@ -74,21 +74,27 @@ public final class ExtensionCapabilityDetector {
             nativeMisses.addAll(Arrays.asList(NATIVE_MARKERS));
         }
 
-        boolean fullJavaBridge = containsClass(javaHits,
-                "org.chromium.chrome.browser.extensions.ExtensionSystemManager");
         int strongNative = 0;
         for (String marker : new String[]{
                 "ExtensionSystemImpl", "ExtensionService", "ExtensionRegistry",
                 "ExtensionFunctionDispatcher", "ExtensionUserScriptLoader"}) {
             if (nativeHits.contains(marker)) strongNative++;
         }
+        int strongJava = 0;
+        for (String name : new String[]{
+                "org.chromium.chrome.browser.extensions.ExtensionSystemManager",
+                "org.chromium.chrome.browser.extensions.ExtensionInstallerBridge",
+                "org.chromium.chrome.browser.extensions.ExtensionActionManagerBridge"}) {
+            if (javaHits.contains(name)) strongJava++;
+        }
 
         ExtensionRuntimeMode mode;
-        if (strongNative >= 4) mode = ExtensionRuntimeMode.FULL;
+        // A complete Android-facing bridge is itself strong evidence of a compiled Extension Core.
+        // This also avoids false LITE classification when libchrome.so is mapped directly from an
+        // APK and therefore has no ordinary filesystem path that can be scanned safely.
+        if (strongNative >= 4 || strongJava >= 3) mode = ExtensionRuntimeMode.FULL;
         else if (hasCoreBrowserAnchors(javaHits)) mode = ExtensionRuntimeMode.LITE;
         else mode = ExtensionRuntimeMode.NONE;
-
-        if (fullJavaBridge && strongNative >= 3) mode = ExtensionRuntimeMode.FULL;
 
         return new ExtensionCapabilityReport(mode, javaHits, javaMisses,
                 nativeHits, nativeMisses, lib);
