@@ -6,6 +6,8 @@ import android.util.Log;
 import io.github.libxposed.api.XposedModule;
 
 public final class ModuleMain extends XposedModule {
+    private static final String VERIFIED_CHROME145 = "145.0.7632.218";
+
     private SharedPreferences prefs;
     private HookSupport hooks;
     private String processName = "unknown";
@@ -55,13 +57,14 @@ public final class ModuleMain extends XposedModule {
         } catch (Throwable ignored) {}
 
         ClassLoader loader = runtime.classLoader;
-        if (runtime.is152()) {
+        if (Chrome152.matches(runtime)) {
+            hooks.info("verified exact-build profile selected: " + runtime.versionName);
             installFeature("Chrome 152 verified profile", () ->
                     new Chrome152Hooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 152 runtime corrections", () ->
                     new Chrome152Corrections(this, hooks, prefs, loader).install());
-        } else if (runtime.is145()) {
-            // Legacy short R8 names are strictly confined to the release they were verified on.
+        } else if (VERIFIED_CHROME145.equals(runtime.versionName)) {
+            // Legacy short R8 names are strictly confined to the exact release they were verified on.
             installFeature("Chrome 145 tab hooks", () ->
                     new TabHooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 145 download dialog hooks", () ->
@@ -70,10 +73,11 @@ public final class ModuleMain extends XposedModule {
                     new InstallerHooks(this, hooks, prefs, loader).install());
             installFeature("Chrome 145 banner hooks", () ->
                     new BannerHooks(this, hooks, prefs, loader).install());
-            hooks.info("Chrome 145 compatibility profile active: " + runtime.versionName);
+            hooks.info("verified Chrome 145 profile active: " + runtime.versionName);
         } else {
-            // New/unknown Chrome builds never touch release-specific short names or numeric J.N
-            // selectors. Stable boundaries + DexKit structural resolution are used instead.
+            // New or changed builds never touch release-specific short names or numeric J.N
+            // selectors. This includes point updates within Chrome 145/152 when their exact build
+            // has not been verified.
             installFeature("adaptive Chrome hooks", () ->
                     new AdaptiveChromeHooks(this, hooks, prefs, runtime).install());
             installFeature("adaptive download dialogs", () ->
