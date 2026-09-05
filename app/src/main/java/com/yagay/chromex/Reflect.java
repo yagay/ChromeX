@@ -82,9 +82,9 @@ final class Reflect {
     }
 
     static Method signature(Class<?> type, Class<?> returnType, Class<?>... params) {
-        Method found = null;
         Class<?> c = type;
         while (c != null && c != Object.class) {
+            Method found = null;
             for (Method m : c.getDeclaredMethods()) {
                 if (!returnCompatible(returnType, m.getReturnType())) continue;
                 Class<?>[] actual = m.getParameterTypes();
@@ -97,13 +97,16 @@ final class Reflect {
                     }
                 }
                 if (!ok) continue;
-                if (found != null) return null; // ambiguous: fail safe
+                if (found != null) return null; // ambiguous within this declaring class
                 m.setAccessible(true);
                 found = m;
             }
+            // Traversal starts at the runtime class. A matching method here overrides/hides an
+            // equivalent superclass method and must win instead of being treated as ambiguity.
+            if (found != null) return found;
             c = c.getSuperclass();
         }
-        return found;
+        return null;
     }
 
     static Object call(Object target, String name, Object... args) throws ReflectiveOperationException {
@@ -156,9 +159,9 @@ final class Reflect {
     }
 
     private static Method findCompatible(Class<?> type, String name, Object[] args) {
-        Method found = null;
         Class<?> c = type;
         while (c != null && c != Object.class) {
+            Method found = null;
             for (Method m : c.getDeclaredMethods()) {
                 if (!m.getName().equals(name)) continue;
                 Class<?>[] p = m.getParameterTypes();
@@ -171,13 +174,16 @@ final class Reflect {
                     }
                 }
                 if (!ok) continue;
-                if (found != null) return null;
+                if (found != null) return null; // real overload ambiguity in the same class
                 m.setAccessible(true);
                 found = m;
             }
+            // A method declared by the most-derived class is the normal Java dispatch target.
+            // Do not count an overridden method in its superclass as a second ambiguous candidate.
+            if (found != null) return found;
             c = c.getSuperclass();
         }
-        return found;
+        return null;
     }
 
     private static boolean returnCompatible(Class<?> wanted, Class<?> actual) {
