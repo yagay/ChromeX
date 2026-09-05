@@ -4,11 +4,11 @@ package com.yagay.chromex;
 public final class ExtensionBackendSelector {
     private ExtensionBackendSelector() {}
 
-    public static ExtensionBackend select(ExtensionCapabilityReport report) {
+    public static ExtensionBackend select(ExtensionCapabilityReport report, ClassLoader classLoader) {
         if (report == null) return new UnavailableExtensionBackend();
         switch (report.mode) {
             case FULL:
-                return new NativeExtensionBackend(report);
+                return new NativeExtensionBackend(report, classLoader);
             case LITE:
                 return new LiteExtensionBackend(report);
             case NONE:
