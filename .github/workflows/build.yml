@@ -35,3 +35,5 @@ jobs:
         with:
           name: ChromeX-release-unsigned
           path: app/build/outputs/apk/release/*.apk
+
+# Rebuild trigger: 2026-09-05
