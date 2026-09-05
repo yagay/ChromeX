@@ -49,7 +49,7 @@ public final class ModuleMain extends XposedModule {
 
     private void installForRuntime(ChromeRuntime runtime) {
         RuntimeDiagnostics.flushPendingIfPossible();
-        ChromiumProfile profile = ChromiumProfile.resolve(runtime);
+        ChromiumProfile profile = ChromiumProfile.resolve(runtime, hooks);
         if (profile == null) {
             hooks.warn("No compatible Chromium profile for " + targetPackage
                     + " version=" + runtime.versionName);
@@ -58,14 +58,21 @@ public final class ModuleMain extends XposedModule {
         }
 
         hooks.info("Chromium capability profile selected: " + profile.label()
-                + " package=" + targetPackage + " version=" + runtime.versionName);
+                + " package=" + targetPackage
+                + " appVersion=" + runtime.versionName
+                + " engine=" + profile.engineVersion);
 
         installFeature("same-name download overwrite", () ->
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install());
         installFeature("download history rewrite", () ->
                 new DownloadHistoryRewriteHooks(runtime, hooks, prefs).install());
-        installFeature("Chromium tabs/homepage", () ->
-                new ChromiumTabsHooks(profile, runtime, hooks, prefs).install());
+        installFeature("Chromium tabs/homepage", () -> {
+            if (profile.isAdaptive()) {
+                new AdaptiveChromiumTabsHooks(profile, runtime, hooks, prefs).install();
+            } else {
+                new ChromiumTabsHooks(profile, runtime, hooks, prefs).install();
+            }
+        });
         installFeature("Chromium downloads", () ->
                 new ChromiumDownloadHooks(profile, runtime, hooks, prefs).install());
 
@@ -75,7 +82,7 @@ public final class ModuleMain extends XposedModule {
             log(Log.WARN, "ChromeX", "diagnostic locator scheduling failed", t);
         }
         hooks.info("shared Chromium feature layers installed: " + profile.family
-                + " package=" + targetPackage);
+                + " package=" + targetPackage + " engine=" + profile.engineVersion);
     }
 
     private void installFeature(String name, Runnable installer) {
