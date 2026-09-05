@@ -7,6 +7,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -39,7 +40,6 @@ final class AdaptiveChromeHooks {
         hooks.info("adaptive resolver profile active for Chrome " + runtime.versionName);
         installNoRestoreBySignature();
         homepageGetter = DexKitResolver.resolveHomepageGetter(runtime, hooks);
-        installModelCapture();
         installActivityLifecycle();
         installStableProgrammaticNewTabRedirect();
         installTranslateSuppression();
@@ -73,26 +73,20 @@ final class AdaptiveChromeHooks {
         }
     }
 
-    private void installModelCapture() {
-        hooks.all(runtime.classLoader, Chrome145.TAB_MODEL, "getCount",
-                "chromex:adaptive:model", chain -> {
-                    Object result = chain.proceed();
-                    remember(chain.getThisObject());
-                    return result;
-                });
-    }
-
     private void installActivityLifecycle() {
         hooks.exact(runtime.classLoader, Chrome145.ACTIVITY, "onStart", new Class<?>[0],
                 "chromex:adaptive:onStart", chain -> {
                     Object result = chain.proceed();
                     Object receiver = chain.getThisObject();
-                    if (receiver instanceof Activity && Config.get(prefs, Config.CLEAN_START)) {
+                    if (receiver instanceof Activity) {
                         Activity activity = (Activity) receiver;
-                        Intent intent = activity.getIntent();
-                        if (intent != null && Intent.ACTION_MAIN.equals(intent.getAction())
-                                && intent.getData() == null) {
-                            main.postDelayed(this::settleColdStart, 1400L);
+                        captureModelsFromActivity(activity);
+                        if (Config.get(prefs, Config.CLEAN_START)) {
+                            Intent intent = activity.getIntent();
+                            if (intent != null && Intent.ACTION_MAIN.equals(intent.getAction())
+                                    && intent.getData() == null) {
+                                main.postDelayed(this::settleColdStart, 1400L);
+                            }
                         }
                     }
                     return result;
@@ -103,10 +97,91 @@ final class AdaptiveChromeHooks {
                     Object receiver = chain.getThisObject();
                     if (receiver instanceof Activity && ((Activity) receiver).isFinishing()
                             && Config.get(prefs, Config.CLEAR_CLOSED_TABS)) {
+                        captureModelsFromActivity((Activity) receiver);
                         closeAllKnownTabs();
                     }
                     return chain.proceed();
                 });
+    }
+
+    /**
+     * Capture regular/incognito TabModels without knowing the obfuscated selector class or field.
+     * ChromeTabbedActivity keeps a selector object that exposes a one-boolean method returning the
+     * stable TabModel API. We invoke it only when that structural candidate is unique.
+     */
+    private void captureModelsFromActivity(Activity activity) {
+        if (activity == null) return;
+        try {
+            Class<?> bridgeType = Reflect.cls(runtime.classLoader, Chrome145.TAB_MODEL);
+            Class<?> apiType = Reflect.cls(runtime.classLoader, Chrome145.TAB_MODEL_API);
+            ArrayList<SelectorCall> selectors = new ArrayList<>();
+
+            Class<?> owner = activity.getClass();
+            while (owner != null && owner != Object.class) {
+                for (Field field : owner.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers())) continue;
+                    Object value;
+                    try {
+                        field.setAccessible(true);
+                        value = field.get(activity);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (value == null) continue;
+                    if (bridgeType.isInstance(value) || apiType.isInstance(value)) {
+                        remember(value);
+                        continue;
+                    }
+
+                    Method candidate = findModelSelector(value.getClass(), bridgeType, apiType);
+                    if (candidate != null) selectors.add(new SelectorCall(value, candidate));
+                }
+                owner = owner.getSuperclass();
+            }
+
+            if (selectors.size() != 1) {
+                if (selectors.size() > 1) {
+                    hooks.warn("adaptive TabModel selector ambiguous: candidates=" + selectors.size());
+                }
+                return;
+            }
+
+            SelectorCall selector = selectors.get(0);
+            for (boolean incognito : new boolean[]{false, true}) {
+                try {
+                    Object model = selector.method.invoke(selector.owner, incognito);
+                    if (model != null) remember(model);
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            hooks.warn("adaptive TabModel capture unavailable: " + t.getClass().getSimpleName());
+        }
+    }
+
+    private Method findModelSelector(Class<?> type, Class<?> bridgeType, Class<?> apiType) {
+        Method found = null;
+        Class<?> current = type;
+        while (current != null && current != Object.class) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (Modifier.isStatic(method.getModifiers())) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1 || params[0] != boolean.class) continue;
+                Class<?> result = method.getReturnType();
+                if (!(bridgeType.isAssignableFrom(result) || apiType.isAssignableFrom(result))) {
+                    continue;
+                }
+                if (found != null && !sameMethod(found, method)) return null;
+                method.setAccessible(true);
+                found = method;
+            }
+            current = current.getSuperclass();
+        }
+        return found;
+    }
+
+    private static boolean sameMethod(Method a, Method b) {
+        return a.getName().equals(b.getName())
+                && a.getDeclaringClass() == b.getDeclaringClass();
     }
 
     private void settleColdStart() {
@@ -178,7 +253,13 @@ final class AdaptiveChromeHooks {
                 if (factory == null) return null;
                 owner = factory.invoke(null);
             }
-            return getter.invoke(owner, false);
+            if (getter.getParameterCount() == 2) {
+                return getter.invoke(owner, false, false);
+            }
+            if (getter.getParameterCount() == 1) {
+                return getter.invoke(owner, false);
+            }
+            return null;
         } catch (Throwable t) {
             hooks.warn("adaptive homepage invocation failed: " + t.getClass().getSimpleName());
             return null;
@@ -291,5 +372,15 @@ final class AdaptiveChromeHooks {
     private boolean isNtp(String value) {
         return value != null && (value.startsWith("chrome-native://newtab")
                 || value.startsWith("chrome://newtab"));
+    }
+
+    private static final class SelectorCall {
+        final Object owner;
+        final Method method;
+
+        SelectorCall(Object owner, Method method) {
+            this.owner = owner;
+            this.method = method;
+        }
     }
 }
