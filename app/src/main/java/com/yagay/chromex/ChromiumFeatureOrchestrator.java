@@ -23,9 +23,7 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installOverwriteDuplicateHook();
-        installCompletionNameNormalizer();
-        installOfflineDisplayNameNormalizer();
+        installSameNameOverwriteFromEceff5b();
         installDownloadHistory();
         installTabs();
         installDownloads();
@@ -34,33 +32,25 @@ final class ChromiumFeatureOrchestrator {
     }
 
     /**
-     * Same-name overwrite deliberately has one duplicate-conflict hook. We no longer pre-vacate a
-     * guessed filesystem directory or install an OfflineContent rename hook here; the authoritative
-     * artifact is normalized only after Chromium commits it.
+     * Same-name overwrite implementation restored from eceff5b20cb75749f8efdf8de9a327602dd263e3.
+     * Adaptive Chromium installs its OfflineItem capture first, then consumes the duplicate dialog.
+     * Verified Chrome builds use the original SameNameOverwriteHooks implementation from that commit.
      */
-    private void installOverwriteDuplicateHook() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 60)) return;
-        install("unified overwrite duplicate hook", () ->
-                new UniversalOverwriteDuplicateHook(profile, runtime, hooks, prefs).install());
-    }
-
-    private void installCompletionNameNormalizer() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
+    private void installSameNameOverwriteFromEceff5b() {
+        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 60)
+                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
                 || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_COMPLETION, 60)) {
-            skip("completion filename normalization", "info/completion capability incomplete");
+            skip("same-name overwrite", "duplicate/info/completion capability incomplete");
             return;
         }
-        install("completion filename normalization", () ->
-                new CompletionNameNormalizerHooks(profile, runtime, hooks, prefs).install());
-    }
-
-    private void installOfflineDisplayNameNormalizer() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_OFFLINE_UI, 60)) {
-            skip("offline display-name normalization", "OfflineItem UI capability incomplete");
-            return;
-        }
-        install("offline display-name normalization", () ->
-                new OfflineItemDisplayNameNormalizer(runtime, hooks).install());
+        install("same-name overwrite (eceff5b)", () -> {
+            if (profile.isAdaptive()) {
+                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
+                new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
+            } else {
+                new SameNameOverwriteHooks(runtime, hooks, prefs).install();
+            }
+        });
     }
 
     private void installDownloadHistory() {
