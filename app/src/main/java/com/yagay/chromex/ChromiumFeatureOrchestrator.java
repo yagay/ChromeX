@@ -23,7 +23,7 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installNativeConflictPolicy();
+        installChromeXDownloader();
         installTabs();
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
@@ -31,20 +31,18 @@ final class ChromiumFeatureOrchestrator {
     }
 
     /**
-     * Same-name overwrite is implemented only at Chromium's native reservation boundary.
-     *
-     * <p>The former duplicate-dialog normalizer, history deduper, Java DownloadManager replacement,
-     * and native-cancel/re-download experiment are intentionally not installed. Chrome keeps its own
-     * downloader, cookies, POST/range/resume support, Safe Browsing, notifications and history;
-     * ChromeX changes only FilenameConflictAction before GetReservedPath executes.</p>
+     * ChromeX owns reconstructible HTTP/HTTPS GET downloads instead of patching Chrome's filename
+     * conflict policy. The replacement downloader proves that the remote request is accepted before
+     * cancelling Chrome's native DownloadItem. Authenticated/special downloads that cannot be
+     * reconstructed are automatically left with Chrome.
      */
-    private void installNativeConflictPolicy() {
+    private void installChromeXDownloader() {
         if (!Config.get(prefs, Config.OVERWRITE_DUPLICATE)) {
-            skip("native same-name overwrite", "disabled by user");
+            skip("ChromeX downloader takeover", "disabled by user");
             return;
         }
-        install("native same-name overwrite", () ->
-                NativeDownloadConflictBridge.install(runtime, hooks));
+        install("ChromeX downloader takeover", () ->
+                new ChromeXNativeDownloadTakeover(runtime, hooks, prefs).install());
     }
 
     private void installTabs() {
