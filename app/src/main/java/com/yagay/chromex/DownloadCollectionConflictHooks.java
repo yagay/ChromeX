@@ -7,9 +7,12 @@ import android.net.Uri;
 import android.os.Environment;
 import android.provider.MediaStore;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -225,14 +228,23 @@ final class DownloadCollectionConflictHooks {
                     .start();
             boolean finished = process.waitFor(2, TimeUnit.SECONDS);
             if (finished && process.exitValue() == 0) {
-                byte[] bytes = process.getInputStream().readAllBytes();
-                String resolved = new String(bytes).trim();
+                String resolved = readProcessOutput(process.getInputStream()).trim();
                 if (!resolved.isBlank()) return resolved;
             } else if (!finished) {
                 process.destroyForcibly();
             }
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    private static String readProcessOutput(InputStream input) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            output.write(buffer, 0, read);
+        }
+        return output.toString(StandardCharsets.UTF_8.name());
     }
 
     /** Best-effort cleanup for stale MediaStore rows after the physical replacement succeeds. */
