@@ -63,6 +63,7 @@ final class NativeFirstSameNameOverwriteHooks {
     void install() {
         recoverDefaultDirectories();
         installDuplicateCapture();
+        installEarlyCapture();
         installCompletion(Chrome145.DOWNLOAD_CONTROLLER,
                 "chromex:overwrite:source-first:controller");
         installCompletion(Chrome145.DOWNLOAD_MANAGER_SERVICE,
@@ -120,6 +121,14 @@ final class NativeFirstSameNameOverwriteHooks {
                         return chain.proceed();
                     }
 
+                    // Register a prediction so UI hooks can normalize the name even before the item is fully created.
+                    String nextName = predictNextUniquifiedName(target.baseName, target.directory);
+                    DownloadNormalizationRegistry.register(new File(target.directory, nextName), desired);
+
+                    if (renameBinding != null) {
+                        renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName());
+                    }
+
                     if (!confirmDuplicate(chain.getThisObject(), callback)) {
                         forget(pending);
                         rollbackReservation(pending, "confirm-failed");
@@ -132,6 +141,44 @@ final class NativeFirstSameNameOverwriteHooks {
                             + " oldBackedUp=" + pending.reservation.hasBackup());
                     return null;
                 });
+    }
+
+    private void installEarlyCapture() {
+        String service = Chrome145.DOWNLOAD_MANAGER_SERVICE;
+        for (String method : new String[]{"onDownloadItemCreated", "onDownloadItemUpdated"}) {
+            hooks.all(runtime.classLoader, service, method, "chromex:overwrite:early:" + method, chain -> {
+                if (Config.stored(prefs, Config.OVERWRITE_DUPLICATE)) {
+                    Object info = DownloadInfoAccessor.find(chain.getArgs().toArray(), runtime.classLoader);
+                    if (info != null) tryRegisterEarly(info);
+                }
+                return chain.proceed();
+            });
+        }
+    }
+
+    private void tryRegisterEarly(Object info) {
+        DownloadInfoAccessor.Values values = DownloadInfoAccessor.read(info, profile);
+        if (!values.usable()) return;
+        File direct = sharedFile(values.path);
+        PendingTarget pending = peekMatching(direct, values.path, values.name);
+        if (pending != null) {
+            File desired = new File(pending.directory, pending.baseName);
+            if (!sameFile(direct, desired)) {
+                DownloadNormalizationRegistry.register(direct, desired);
+                
+                // Immediately attempt to normalize the name in the backend DB.
+                // This ensures the record doesn't point to a numbered path that we'll eventually delete.
+                if (renameBinding != null) {
+                    main.postDelayed(() -> {
+                        renameBinding.rename(values.path, values.name, desired.getName(), (success, code, source) -> {
+                            if (success) {
+                                hooks.info("same-name overwrite: early native rename successful for " + pending.baseName);
+                            }
+                        });
+                    }, 200L);
+                }
+            }
+        }
     }
 
     private void installCompletion(String owner, String id) {
@@ -193,6 +240,22 @@ final class NativeFirstSameNameOverwriteHooks {
         // Preferred path: vacating the old target allowed Chromium itself to keep the original name.
         if (sameFile(actual, desired)) {
             boolean metadataChanged = DownloadInfoAccessor.rewrite(info, profile, desired);
+            String reportedName = DownloadNamePolicy.fileNameOnly(values.path);
+            if (reportedName != null && !reportedName.equals(desired.getName())
+                    && DownloadNamePolicy.matchesUniquifiedName(desired.getName(), reportedName)) {
+                File reportedFile = new File(desired.getParentFile(), reportedName);
+                DownloadNormalizationRegistry.register(reportedFile, desired);
+            }
+            if (renameBinding != null) {
+                // Ensure we don't accidentally delete the NEW record if it already has the desired path.
+                OfflineContentRenameBinding.Record current = renameBinding.findRecordForInfo(info);
+                if (current != null) {
+                    renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName(),
+                            current.namespace, current.id);
+                } else {
+                    renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName());
+                }
+            }
             commitReservation(pending, "reservation-source");
             refreshMediaIndex(null, desired, "reservation-source");
             hooks.info("same-name overwrite preserved original at reservation source: "
@@ -208,29 +271,31 @@ final class NativeFirstSameNameOverwriteHooks {
         }
 
         // Tier 2: backend still uniquified. Ask Chromium's own OfflineContent source to rename it.
+        // We do this BEFORE moving the file manually, so Native code can do the move and DB update together.
         if (renameBinding != null && renameBinding.available()) {
-            DownloadConflictPolicyBinding.Reservation renamePrep = conflictBinding.vacate(desired);
-            if (renamePrep != null) {
-                boolean started = renameBinding.rename(actual.getAbsolutePath(), actual.getName(),
-                        desired.getName(), (success, code, source) -> main.post(() -> {
-                            if (success) {
-                                finishSourceRenameSuccess(info, pending, actual, desired,
-                                        renamePrep, source, code);
-                            } else {
-                                conflictBinding.rollback(renamePrep);
-                                hooks.warn("Chromium source rename rejected: " + actual.getName()
-                                        + " -> " + desired.getName() + " result=" + code
-                                        + " source=" + source + "; using filesystem fallback");
-                                fallbackReplace(info, pending, actual, desired,
-                                        "native-result=" + code);
-                            }
-                        }));
-                if (started) return;
-                conflictBinding.rollback(renamePrep);
-                if (attempt < MAX_NATIVE_WAIT_RETRIES) {
-                    restorePending(pending);
-                    main.postDelayed(() -> normalize(info, attempt + 1), RETRY_MS);
-                    return;
+            OfflineContentRenameBinding.Record match = renameBinding.findRecord(actual.getAbsolutePath(), actual.getName());
+            if (match == null) match = renameBinding.findMatchingRecord(pending.baseName);
+            
+            if (match != null) {
+                final OfflineContentRenameBinding.Record finalMatch = match;
+                DownloadConflictPolicyBinding.Reservation renamePrep = conflictBinding.vacate(desired);
+                if (renamePrep != null) {
+                    boolean started = renameBinding.renameById(match.namespace, match.id,
+                            desired.getName(), (success, code, source) -> main.post(() -> {
+                                if (success) {
+                                    finishSourceRenameSuccess(info, pending, actual, desired,
+                                            renamePrep, source, code);
+                                } else {
+                                    conflictBinding.rollback(renamePrep);
+                                    hooks.warn("Chromium source rename rejected: " + finalMatch.name
+                                            + " -> " + desired.getName() + " result=" + code
+                                            + " source=" + source + "; using filesystem fallback");
+                                    fallbackReplace(info, pending, actual, desired,
+                                            "native-result=" + code);
+                                }
+                            }));
+                    if (started) return;
+                    conflictBinding.rollback(renamePrep);
                 }
             }
         }
@@ -255,6 +320,15 @@ final class NativeFirstSameNameOverwriteHooks {
                 commitReservation(pending, "offline-source");
                 DownloadNormalizationRegistry.register(oldActual, desired);
                 DownloadInfoAccessor.rewrite(info, profile, desired);
+                if (renameBinding != null) {
+                    OfflineContentRenameBinding.Record current = renameBinding.findRecordForInfo(info);
+                    if (current != null) {
+                        renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName(),
+                                current.namespace, current.id);
+                    } else {
+                        renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName());
+                    }
+                }
                 refreshMediaIndex(oldActual, desired, "offline-source");
                 scheduleResidualCleanup(oldActual, desired);
                 hooks.info("same-name overwrite source normalized: "
@@ -279,6 +353,25 @@ final class NativeFirstSameNameOverwriteHooks {
         commitReservation(pending, "filesystem-fallback");
         DownloadNormalizationRegistry.register(actual, desired);
         DownloadInfoAccessor.rewrite(info, profile, desired);
+
+        if (renameBinding != null) {
+            OfflineContentRenameBinding.Record current = renameBinding.findRecordForInfo(info);
+            if (current != null) {
+                // First, remove the pre-existing record for the original path, excluding our new one.
+                renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName(),
+                        current.namespace, current.id);
+            } else {
+                renameBinding.deleteItem(desired.getAbsolutePath(), desired.getName());
+            }
+            // Then, attempt to update the NEW download's database record to the original path.
+            renameBinding.rename(actual.getAbsolutePath(), actual.getName(), desired.getName(),
+                    (success, code, source) -> {
+                        if (success) {
+                            hooks.info("same-name overwrite database updated after fallback move");
+                        }
+                    });
+        }
+
         refreshMediaIndex(actual, desired, "filesystem-fallback");
         scheduleResidualCleanup(actual, desired);
         hooks.info("same-name overwrite fallback normalized: " + actual.getAbsolutePath()
@@ -544,6 +637,16 @@ final class NativeFirstSameNameOverwriteHooks {
         return null;
     }
 
+    private PendingTarget peekMatching(File direct, String... reported) {
+        synchronized (pendingLock) {
+            for (int i = pendingTargets.size() - 1; i >= 0; i--) {
+                PendingTarget pending = pendingTargets.get(i);
+                if (matches(pending, direct, reported)) return pending;
+            }
+        }
+        return null;
+    }
+
     private boolean matches(PendingTarget pending, File direct, String... reported) {
         if (pending == null) return false;
         if (direct != null && (direct.getName().equals(pending.baseName)
@@ -617,6 +720,17 @@ final class NativeFirstSameNameOverwriteHooks {
             }
         }
         return null;
+    }
+
+    private String predictNextUniquifiedName(String baseName, File directory) {
+        int dot = baseName.lastIndexOf('.');
+        String stem = dot > 0 ? baseName.substring(0, dot) : baseName;
+        String ext = dot > 0 ? baseName.substring(dot) : "";
+        for (int i = 1; i < 100; i++) {
+            String candidate = stem + " (" + i + ")" + ext;
+            if (!new File(directory, candidate).exists()) return candidate;
+        }
+        return stem + " (1)" + ext;
     }
 
     private static File sharedFile(String raw) {

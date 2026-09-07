@@ -63,8 +63,30 @@ final class UniversalDownloadHistoryHooks {
         hookService("onAllDownloadsRetrieved", "list", true);
         hookService("createDownloadItemList", "create-list", true);
         hookService("addDownloadItemToList", "add-list", true);
+        hookAggregator("onItemsAdded");
+        hookAggregator("onItemUpdated");
         hookOfflineMaterializer();
         hooks.info("universal download history hooks installed");
+    }
+
+    private void hookAggregator(String method) {
+        String aggregator = ChromiumSemanticAnchors.OFFLINE_CONTENT_AGGREGATOR_BRIDGE;
+        hooks.all(runtime.classLoader, aggregator, method, "chromex:universal-history:aggregator:" + method, chain -> {
+            if (enabled()) {
+                for (Object arg : chain.getArgs().toArray()) {
+                    if (arg instanceof List<?>) {
+                        rewriteAndDedupe((List<?>) arg);
+                    } else if (isOfflineItem(arg)) {
+                        rewriteByRegistry(arg);
+                    }
+                }
+            }
+            return chain.proceed();
+        });
+    }
+
+    private boolean isOfflineItem(Object value) {
+        return value != null && ChromiumSemanticAnchors.OFFLINE_ITEM.equals(value.getClass().getName());
     }
 
     private boolean enabled() {
@@ -78,13 +100,26 @@ final class UniversalDownloadHistoryHooks {
                     captureService(chain.getThisObject());
                     if (enabled()) {
                         rememberArguments(chain.getArgs().toArray());
-                        if (dedupe) rewriteAndDedupeArguments(chain.getArgs().toArray());
-                        else rewriteArguments(chain.getArgs().toArray());
+                        rewriteArguments(chain.getArgs().toArray());
                     }
                     Object result = chain.proceed();
-                    if (enabled() && result instanceof List<?>) {
-                        rememberList((List<?>) result);
-                        rewriteAndDedupe((List<?>) result);
+                    if (enabled()) {
+                        if (result instanceof List<?>) {
+                            rememberList((List<?>) result);
+                            rewriteAndDedupe((List<?>) result);
+                        }
+                        // Force a full list deduplication on every update to keep the UI clean.
+                        Object service = currentService();
+                        if (service != null) {
+                            try {
+                                Object items = Reflect.get(service, "mDownloadItems"); // Standard field name
+                                if (items instanceof List<?>) rewriteAndDedupe((List<?>) items);
+                            } catch (Throwable ignored) {}
+                            try {
+                                Object items = Reflect.get(service, "A"); // Chrome 145/152 common
+                                if (items instanceof List<?>) rewriteAndDedupe((List<?>) items);
+                            } catch (Throwable ignored) {}
+                        }
                     }
                     return result;
                 });
@@ -161,6 +196,20 @@ final class UniversalDownloadHistoryHooks {
     private void rememberItem(Object value) {
         Object item = asDownloadItem(value);
         if (item == null) return;
+        
+        // Ensure OfflineContentRenameBinding captures this item immediately.
+        // This is crucial for records already in history from previous sessions.
+        try {
+            Method materializer = DownloadOfflineItemBinding.resolve(runtime.classLoader);
+            if (materializer != null) {
+                Object offline = materializer.invoke(null, item);
+                if (offline != null) {
+                    // This will trigger captureOffline in the binding.
+                    // We don't need to do anything with the result.
+                }
+            }
+        } catch (Throwable ignored) {}
+
         synchronized (recentLock) {
             boolean found = false;
             Iterator<WeakReference<Object>> iterator = recentItems.iterator();
@@ -271,11 +320,14 @@ final class UniversalDownloadHistoryHooks {
             Object winner = newer(previous, value);
             Object loser = winner == previous ? value : previous;
             winners.put(key, winner);
-            remove.add(loser);
+            if (loser != null && !remove.contains(loser)) remove.add(loser);
         }
         if (remove.isEmpty()) return;
         try {
-            ((List) list).removeAll(remove);
+            // Try removing from the list directly if it's mutable.
+            for (Object obj : remove) {
+                try { ((List) list).remove(obj); } catch (Throwable ignored) {}
+            }
             hooks.info("download history deduped rows=" + remove.size());
         } catch (Throwable t) {
             hooks.warn("download history dedupe skipped: " + t.getClass().getSimpleName());
@@ -285,12 +337,16 @@ final class UniversalDownloadHistoryHooks {
     private Object newer(Object a, Object b) {
         long ta = timestamp(a);
         long tb = timestamp(b);
-        return tb > ta ? b : a;
+        // Recency is the authoritative winner for same-name overwrite. A fresh download
+        // (even if in-progress) must always replace the representation of an older one.
+        return tb >= ta ? b : a;
     }
 
     private long timestamp(Object owner) {
         if (owner == null) return Long.MIN_VALUE;
         long best = Long.MIN_VALUE;
+        // Search for the highest valid Unix timestamp in milliseconds.
+        // Chromium's start/completion times typically fall in this range for 2000-2100.
         Class<?> type = owner.getClass();
         while (type != null && type != Object.class) {
             for (Field field : type.getDeclaredFields()) {
@@ -298,7 +354,9 @@ final class UniversalDownloadHistoryHooks {
                 try {
                     field.setAccessible(true);
                     long value = field.getLong(owner);
-                    if (value > 946684800000L && value < 4102444800000L && value > best) best = value;
+                    if (value > 946684800000L && value < 4102444800000L && value > best) {
+                        best = value;
+                    }
                 } catch (Throwable ignored) {}
             }
             type = type.getSuperclass();
@@ -381,6 +439,9 @@ final class UniversalDownloadHistoryHooks {
         if (owner == null || target == null) return;
         String newPath = target.target.getAbsolutePath();
         String newName = target.target.getName();
+        String oldStem = DownloadNamePolicy.stem(target.oldName);
+        String newStem = DownloadNamePolicy.stem(newName);
+
         Class<?> type = owner.getClass();
         while (type != null && type != Object.class) {
             for (Field field : type.getDeclaredFields()) {
@@ -394,6 +455,7 @@ final class UniversalDownloadHistoryHooks {
                     if (samePath(value, target.oldPath)) replacement = newPath;
                     else if (target.oldName.equals(value)) replacement = newName;
                     else if (("file://" + target.oldPath).equals(value)) replacement = "file://" + newPath;
+                    else if (oldStem != null && oldStem.equals(value)) replacement = newStem;
                     if (replacement != null && !replacement.equals(value)) field.set(owner, replacement);
                 } catch (Throwable ignored) {}
             }
@@ -468,11 +530,47 @@ final class UniversalDownloadHistoryHooks {
 
     private String logicalPath(Object owner) {
         Object info = downloadInfoFrom(owner);
-        String path = infoPath(info);
+        String path = null;
+        String name = null;
+        if (info != null) {
+            DownloadInfoAccessor.Values v = DownloadInfoAccessor.read(info, profile);
+            path = v.path;
+            name = v.name;
+        }
         if (path == null) path = firstAbsolutePath(owner);
-        if (path == null) return null;
-        String mapped = DownloadNormalizationRegistry.resolve(path);
-        return mapped == null ? path : mapped;
+        if (name == null) name = firstFileName(owner);
+        
+        if (path != null) {
+            String mapped = DownloadNormalizationRegistry.resolve(path);
+            if (mapped != null) return mapped;
+            return path;
+        }
+        if (name != null) {
+            // For items without a path (pending), deduplicate based on the original base name.
+            String original = DownloadNamePolicy.originalNameFromUniquified(name);
+            return "name:" + (original != null ? original : name);
+        }
+        return null;
+    }
+
+    private String firstFileName(Object owner) {
+        if (owner == null) return null;
+        Class<?> type = owner.getClass();
+        while (type != null && type != Object.class) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) continue;
+                try {
+                    field.setAccessible(true);
+                    Object raw = field.get(owner);
+                    if (raw instanceof String) {
+                        String s = (String) raw;
+                        if (AdaptiveDownloadInfo.looksLikeFileName(s)) return s;
+                    }
+                } catch (Throwable ignored) {}
+            }
+            type = type.getSuperclass();
+        }
+        return null;
     }
 
     private static boolean samePath(String a, String b) {

@@ -159,7 +159,6 @@ public final class Config {
                 || isAutoOpenKey(key)
                 || DIAGNOSTIC_MODE.equals(key)
                 || ALL_DOWNLOAD_TOAST.equals(key)
-                || OVERWRITE_DUPLICATE.equals(key)
                 || OVERWRITE_CONFIRM_DUPLICATE.equals(key)) {
             return false;
         }

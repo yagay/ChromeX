@@ -26,8 +26,8 @@ final class OfflineContentRenameBinding {
     private static final String BRIDGE = ChromiumSemanticAnchors.OFFLINE_CONTENT_AGGREGATOR_BRIDGE;
     private static final String CALLBACK = "org.chromium.base.Callback";
     private static final String SEMANTIC = ChromiumSemanticAnchors.OFFLINE_RENAME_SEMANTIC;
-    private static final long RECORD_TTL_MS = 2L * 60L * 60L * 1000L;
-    private static final int MAX_RECORDS = 256;
+    private static final long RECORD_TTL_MS = 24L * 60L * 60L * 1000L;
+    private static final int MAX_RECORDS = 1024;
     private static final Map<String, NativeCall> NATIVE_CACHE = new ConcurrentHashMap<>();
 
     interface ResultCallback {
@@ -73,8 +73,32 @@ final class OfflineContentRenameBinding {
         hookBridgeFactory();
         hookDownloadItems();
         hookMaterializer();
+        hookAggregatorEvents();
         hooks.info("offline rename binding installed: backend=" + backendLabel()
                 + " materializer=" + (materializer == null ? "none" : methodLabel(materializer)));
+    }
+
+    private void hookAggregatorEvents() {
+        // Capture items from the aggregator's own callbacks to keep our record map complete.
+        String aggregator = ChromiumSemanticAnchors.OFFLINE_CONTENT_AGGREGATOR_BRIDGE;
+        for (String method : new String[]{"onItemsAdded", "onItemUpdated"}) {
+            try {
+                Class<?> type = Reflect.cls(runtime.classLoader, aggregator);
+                if (Reflect.named(type, method).isEmpty()) continue;
+                hooks.all(runtime.classLoader, aggregator, method,
+                        "chromex:offline-rename:aggregator:" + method, chain -> {
+                            rememberBridge(chain.getThisObject());
+                            for (Object arg : chain.getArgs().toArray()) {
+                                if (arg instanceof List<?>) {
+                                    for (Object item : (List<?>) arg) captureOffline(null, item);
+                                } else {
+                                    captureOffline(null, arg);
+                                }
+                            }
+                            return chain.proceed();
+                        });
+            } catch (Throwable ignored) {}
+        }
     }
 
     boolean available() {
@@ -99,42 +123,83 @@ final class OfflineContentRenameBinding {
                     + " path=" + safe(path));
             return false;
         }
+        return renameById(record.namespace, record.id, newName, callback);
+    }
+
+    boolean renameById(String namespace, String id, String newName, ResultCallback callback) {
         Object bridge = currentBridge();
-        if (bridge == null) {
-            hooks.warn("offline rename bridge instance unavailable");
-            return false;
-        }
+        if (bridge == null || namespace == null || id == null) return false;
         long ptr = nativePtr(bridge);
-        if (ptr == 0L) {
-            hooks.warn("offline rename native pointer unavailable");
-            return false;
-        }
+        if (ptr == 0L) return false;
         Object proxy = callbackProxy(callback);
         if (proxy == null) return false;
 
         try {
             if (semanticNative != null) {
-                Class<?>[] p = semanticNative.getParameterTypes();
-                if (p.length == 6 && p[0] == long.class) {
-                    semanticNative.invoke(null, ptr, bridge, record.namespace, record.id, newName, proxy);
-                    hooks.info("offline source rename requested via semantic JNI: "
-                            + safe(name) + " -> " + newName + " id=" + shortId(record.id));
-                    return true;
-                }
-            }
-            NativeCall call = compressedNative;
-            if (call != null) {
-                call.method.invoke(null, call.selector, ptr,
-                        record.namespace, record.id, newName, proxy);
-                hooks.info("offline source rename requested via structural JNI: "
-                        + safe(name) + " -> " + newName + " id=" + shortId(record.id)
-                        + " selector=" + call.selector);
+                semanticNative.invoke(null, ptr, bridge, namespace, id, newName, proxy);
                 return true;
             }
-        } catch (Throwable t) {
-            hooks.warn("offline source rename invocation failed: " + t.getClass().getSimpleName());
-        }
+            if (compressedNative != null) {
+                compressedNative.method.invoke(null, compressedNative.selector, ptr,
+                        namespace, id, newName, proxy);
+                return true;
+            }
+        } catch (Throwable ignored) {}
         return false;
+    }
+
+    boolean deleteItem(String path, String name) {
+        return deleteItem(path, name, null, null);
+    }
+
+    boolean deleteItem(String path, String name, String excludeNamespace, String excludeId) {
+        Record record = findRecord(path, name);
+        if (record == null) {
+            record = findRecordByValue(path, name, excludeNamespace, excludeId);
+        } else if (record.namespace.equals(excludeNamespace) && record.id.equals(excludeId)) {
+            record = findRecordByValue(path, name, excludeNamespace, excludeId);
+        }
+        
+        // If still not found, try to find ANY record that looks like a uniquified version of this name.
+        if (record == null && name != null) {
+            String base = DownloadNamePolicy.originalNameFromUniquified(name);
+            if (base == null) base = name;
+            record = findMatchingRecord(base);
+            if (record != null && record.namespace.equals(excludeNamespace) && record.id.equals(excludeId)) {
+                record = null;
+            }
+        }
+
+        if (record == null) return false;
+
+        Object bridge = currentBridge();
+        if (bridge == null) return false;
+        try {
+            Class<?> idCls = Reflect.cls(runtime.classLoader, ChromiumSemanticAnchors.CONTENT_ID);
+            Method method = Reflect.exact(bridge.getClass(), "removeItem", idCls);
+            Object contentId = Reflect.construct(idCls, record.namespace, record.id);
+            method.invoke(bridge, contentId);
+            hooks.info("offline source item deleted: " + safe(name) + " id=" + shortId(record.id));
+            records.values().remove(record);
+            return true;
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private Record findRecordByValue(String path, String name, String exNs, String exId) {
+        for (Record r : records.values()) {
+            if ((r.path.equals(path) || r.name.equals(name))
+                    && (!r.namespace.equals(exNs) || !r.id.equals(exId))) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    Record findRecordForInfo(Object info) {
+        if (info == null) return null;
+        DownloadInfoAccessor.Values values = DownloadInfoAccessor.read(info, profile);
+        return findRecord(values.path, values.name);
     }
 
     private Method resolveSemanticNative() {
@@ -244,10 +309,20 @@ final class OfflineContentRenameBinding {
     }
 
     private void captureOffline(Object item, Object offline) {
-        if (item == null || offline == null) return;
+        if (offline == null) return;
         ContentRef ref = contentRef(offline);
-        if (ref == null) ref = contentRef(item);
-        storeRecord(item, ref);
+        if (ref == null && item != null) ref = contentRef(item);
+        if (ref == null) return;
+        
+        OfflineItemAccessor.Values values = OfflineItemAccessor.read(offline);
+        if (!values.usable()) return;
+        
+        long now = System.currentTimeMillis();
+        Record record = new Record(ref.namespace, ref.id, values.path, values.name, now);
+        String pathKey = pathKey(values.path);
+        if (pathKey != null) records.put("p:" + pathKey, record);
+        if (values.name != null && !values.name.isBlank()) records.put("n:" + values.name, record);
+        prune(now);
     }
 
     private void captureItem(Object value) {
@@ -269,17 +344,37 @@ final class OfflineContentRenameBinding {
         prune(now);
     }
 
-    private Record findRecord(String path, String name) {
+    Record findRecord(String path, String name) {
         long now = System.currentTimeMillis();
         prune(now);
-        String key = pathKey(path);
-        Record record = key == null ? null : records.get("p:" + key);
-        if (record == null && name != null) record = records.get("n:" + name);
-        if (record == null && path != null) {
-            String base = DownloadNamePolicy.fileNameOnly(path);
-            if (base != null) record = records.get("n:" + base);
+        if (path != null) {
+            String key = pathKey(path);
+            Record record = records.get("p:" + key);
+            if (record != null && now - record.time <= RECORD_TTL_MS) return record;
         }
-        return record != null && now - record.time <= RECORD_TTL_MS ? record : null;
+        if (name != null) {
+            Record record = records.get("n:" + name);
+            if (record != null && now - record.time <= RECORD_TTL_MS) return record;
+        }
+        // Fallback: search all records for a name match
+        if (name != null) {
+            for (Record record : records.values()) {
+                if (name.equals(record.name) || name.equals(DownloadNamePolicy.fileNameOnly(record.path))) {
+                    return record;
+                }
+            }
+        }
+        return null;
+    }
+
+    Record findMatchingRecord(String baseName) {
+        if (baseName == null) return null;
+        for (Record record : records.values()) {
+            if (DownloadNamePolicy.matchesUniquifiedName(baseName, record.name)) {
+                return record;
+            }
+        }
+        return null;
     }
 
     private void prune(long now) {
@@ -470,7 +565,7 @@ final class OfflineContentRenameBinding {
         NamedString(String name, String value) { this.name = name; this.value = value; }
     }
 
-    private static final class Record {
+    static final class Record {
         final String namespace, id, path, name;
         final long time;
         Record(String namespace, String id, String path, String name, long time) {

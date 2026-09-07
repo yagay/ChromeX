@@ -1,5 +1,7 @@
 package com.yagay.chromex;
 
+import android.net.Uri;
+
 import java.io.File;
 
 final class DownloadNamePolicy {
@@ -9,7 +11,7 @@ final class DownloadNamePolicy {
         if (value == null || value.isBlank()) return null;
         try {
             if (value.startsWith("content://")) {
-                android.net.Uri uri = android.net.Uri.parse(value);
+                Uri uri = Uri.parse(value);
                 String segment = uri.getLastPathSegment();
                 return segment == null || segment.isBlank() ? null : segment;
             }
@@ -61,5 +63,11 @@ final class DownloadNamePolicy {
 
         String original = stem.substring(0, open) + ext;
         return original.isBlank() ? null : original;
+    }
+
+    static String stem(String name) {
+        if (name == null || name.isBlank()) return name;
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
     }
 }

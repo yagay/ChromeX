@@ -10,6 +10,7 @@ final class ChromiumFeatureOrchestrator {
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
+    private OfflineContentRenameBinding renameBinding;
 
     ChromiumFeatureOrchestrator(ChromiumProfile profile, ResolvedBindings bindings,
                                 ChromeRuntime runtime, HookSupport hooks,
@@ -23,6 +24,8 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
+        renameBinding = new OfflineContentRenameBinding(profile, runtime, hooks);
+        renameBinding.install();
         installSameNameOverwriteFromEceff5b();
         installDownloadHistory();
         installTabs();
@@ -43,10 +46,10 @@ final class ChromiumFeatureOrchestrator {
             skip("same-name overwrite", "duplicate/info/completion capability incomplete");
             return;
         }
-        install("same-name overwrite (eceff5b)", () -> {
+        install("same-name overwrite (native-first)", () -> {
+            new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
             if (profile.isAdaptive()) {
-                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
-                new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
+                new NativeFirstSameNameOverwriteHooks(profile, runtime, hooks, prefs, renameBinding).install();
             } else {
                 new SameNameOverwriteHooks(runtime, hooks, prefs).install();
             }

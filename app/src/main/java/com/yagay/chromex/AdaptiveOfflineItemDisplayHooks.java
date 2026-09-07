@@ -227,6 +227,8 @@ final class AdaptiveOfflineItemDisplayHooks {
         String numberedName = target.numberedName;
         String newPath = target.newFile.getAbsolutePath();
         String newName = target.newFile.getName();
+        String oldStem = DownloadNamePolicy.stem(numberedName);
+        String newStem = DownloadNamePolicy.stem(newName);
 
         Class<?> c = owner.getClass();
         while (c != null && c != Object.class) {
@@ -240,6 +242,7 @@ final class AdaptiveOfflineItemDisplayHooks {
                     String replacement = null;
                     if (oldPath.equals(value)) replacement = newPath;
                     else if (oldName.equals(value) || numberedName.equals(value)) replacement = newName;
+                    else if (oldStem != null && oldStem.equals(value)) replacement = newStem;
                     else if (("file://" + oldPath).equals(value)) replacement = "file://" + newPath;
                     if (replacement != null && !replacement.equals(value)) {
                         field.set(owner, replacement);
