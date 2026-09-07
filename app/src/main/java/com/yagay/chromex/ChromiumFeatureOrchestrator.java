@@ -24,7 +24,7 @@ final class ChromiumFeatureOrchestrator {
 
     void install() {
         installSameNameOverwriteFromEceff5b();
-        installDownloadHistory();
+        installDownloadListController();
         installTabs();
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
@@ -54,15 +54,16 @@ final class ChromiumFeatureOrchestrator {
         });
     }
 
-    private void installDownloadHistory() {
+    /** Chrome keeps its native download UI, but ChromeX is the single owner of visible list data. */
+    private void installDownloadListController() {
         if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 70)) {
-            skip("download history", "DownloadInfo unavailable");
+            skip("download list controller", "DownloadInfo unavailable");
             return;
         }
         install("download backend refresh", () ->
                 new DownloadBackendRefreshBinding(runtime, hooks).install());
-        install("download history", () ->
-                new UniversalDownloadHistoryHooks(profile, runtime, hooks, prefs).install());
+        install("download list controller", () ->
+                new ChromeDownloadListController(profile, runtime, hooks, prefs).install());
     }
 
     private void installTabs() {
