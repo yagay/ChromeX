@@ -32,22 +32,17 @@ final class ChromiumFeatureOrchestrator {
 
     /**
      * Keep Chrome's native downloader and remove both duplicate-name barriers that can force a
-     * generated "(1)" filename on Android:
-     *
-     * <ol>
-     *   <li>DownloadCollectionBridge.fileNameExists(String) querying the Android download
-     *       collection/MediaStore.</li>
-     *   <li>Chromium native FilenameConflictAction at DownloadPathReservationTracker.</li>
-     * </ol>
-     *
-     * <p>The experimental ChromeX re-download takeover is intentionally not installed while this
-     * path is tested, so diagnostics cannot be confused by two competing download owners.</p>
+     * generated "(1)" filename on Android. The list controller is installed alongside the physical
+     * overwrite pipeline so Chrome's already-open Downloads UI is reconciled immediately instead
+     * of waiting for a browser restart to rebuild its model.
      */
     private void installSameNameOverwrite() {
         if (!Config.get(prefs, Config.OVERWRITE_DUPLICATE)) {
             skip("same-name overwrite", "disabled by user");
             return;
         }
+        install("download list deduper", () ->
+                new ChromeDownloadListController(profile, runtime, hooks, prefs).install());
         install("DownloadCollection duplicate bypass", () ->
                 new DownloadCollectionConflictHooks(runtime, hooks, prefs).install());
         install("native conflict policy", () ->
