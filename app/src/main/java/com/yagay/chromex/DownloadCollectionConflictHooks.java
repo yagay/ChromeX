@@ -4,26 +4,27 @@ import android.content.ContentResolver;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Environment;
 import android.provider.MediaStore;
 
+import java.io.File;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import io.github.libxposed.api.XposedInterface;
 
 /**
  * Controls Chromium's Android DownloadCollection duplicate handling.
  *
- * <p>There are two independent name-conflict layers on Android. Chromium first probes
- * DownloadCollectionBridge.fileNameExists(), while MediaProvider can still uniquify the physical
- * file when createIntermediateUriForPublish() inserts a pending Downloads row. We therefore keep
- * Chromium on the requested logical name and, only after publish succeeds, replace the old
- * same-name MediaStore item and rename the newly published Uri back to the requested name.</p>
+ * <p>Chromium can keep the requested logical name while MediaProvider still uniquifies the real
+ * file at pending-row creation. After publish succeeds, ChromeX resolves the new item's physical
+ * path, removes only the old sibling target through root, then lets Chromium's own
+ * renameDownloadUri() move the new file and update MediaStore consistently.</p>
  *
- * <p>The old item is deliberately kept until the new download has published successfully, so a
- * failed/interrupted replacement download never destroys the existing file.</p>
+ * <p>The old target is never removed before the replacement download has fully published.</p>
  */
 final class DownloadCollectionConflictHooks {
     private static final String BRIDGE =
@@ -77,7 +78,7 @@ final class DownloadCollectionConflictHooks {
     private void installIntermediateCapture() {
         hooks.all(runtime.classLoader, BRIDGE, "createIntermediateUriForPublish",
                 "chromex:download-collection:remember-pending-name", chain -> {
-                    String requested = stringArg(chain, 0);
+                    String requested = safeName(stringArg(chain, 0));
                     Object result = chain.proceed();
                     if (!enabled() || requested == null || !(result instanceof String)) return result;
                     String uri = (String) result;
@@ -91,9 +92,9 @@ final class DownloadCollectionConflictHooks {
     }
 
     /**
-     * The physical filename may already have been uniquified by MediaProvider at pending-row
-     * creation. Wait until publish succeeds, then remove the previous exact-name item and ask
-     * DownloadCollectionBridge to rename this newly completed Uri back to the requested name.
+     * Wait for a successful publish. The newly published item may physically be "name (1).ext".
+     * Free only the requested sibling path through root, then ask Chromium to rename the published
+     * Uri. This preserves MediaStore bookkeeping instead of root-moving the new file behind it.
      */
     private void installPublishReplacement(Class<?> bridge) {
         hooks.all(runtime.classLoader, BRIDGE, "publishDownload",
@@ -107,29 +108,97 @@ final class DownloadCollectionConflictHooks {
                     if (requested == null && published != null) {
                         requested = REQUESTED_NAMES.remove(published);
                     }
+                    requested = safeName(requested);
                     if (requested == null || published == null || published.isBlank()) return result;
 
                     try {
-                        int removed = deletePreviousExactName(requested, published);
+                        PhysicalItem physical = resolvePhysicalItem(published);
+                        RootDeleteResult root = freeRequestedSibling(physical, requested);
                         boolean renamed = renamePublishedUri(bridge, published, requested);
-                        hooks.info("ChromeX DownloadCollection publish replace: name=" + requested
-                                + " removed=" + removed + " renamed=" + renamed
+                        int staleRows = deletePreviousExactName(requested, published);
+                        hooks.info("ChromeX DownloadCollection physical replace: name=" + requested
+                                + " actual=" + (physical.path == null ? "<unknown>" : physical.path)
+                                + " display=" + (physical.displayName == null ? "<unknown>" : physical.displayName)
+                                + " rootTarget=" + (root.target == null ? "<none>" : root.target)
+                                + " rootDeleted=" + root.deleted
+                                + " rootExit=" + root.exitCode
+                                + " renamed=" + renamed
+                                + " staleRows=" + staleRows
                                 + " uri=" + published);
                     } catch (Throwable t) {
-                        hooks.error("ChromeX DownloadCollection publish replace failed: " + requested, t);
+                        hooks.error("ChromeX DownloadCollection physical replace failed: " + requested, t);
                     }
                     return result;
                 });
     }
 
+    private PhysicalItem resolvePhysicalItem(String publishedUri) {
+        Uri uri = Uri.parse(publishedUri);
+        ContentResolver resolver = runtime.application.getContentResolver();
+        String[] projection = {
+                MediaStore.MediaColumns.DATA,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.RELATIVE_PATH
+        };
+        try (Cursor cursor = resolver.query(uri, projection, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String data = columnString(cursor, MediaStore.MediaColumns.DATA);
+                String display = columnString(cursor, MediaStore.MediaColumns.DISPLAY_NAME);
+                String relative = columnString(cursor, MediaStore.MediaColumns.RELATIVE_PATH);
+                if ((data == null || data.isBlank()) && display != null && relative != null) {
+                    File root = Environment.getExternalStorageDirectory();
+                    data = new File(new File(root, relative), display).getAbsolutePath();
+                }
+                return new PhysicalItem(data, display, relative);
+            }
+        } catch (Throwable t) {
+            hooks.warn("ChromeX published path query failed: " + t.getClass().getSimpleName());
+        }
+        return new PhysicalItem(null, null, null);
+    }
+
+    private RootDeleteResult freeRequestedSibling(PhysicalItem physical, String requested) {
+        if (physical.path == null || physical.path.isBlank()) {
+            return new RootDeleteResult(null, false, -2);
+        }
+        try {
+            File actual = new File(physical.path).getCanonicalFile();
+            File parent = actual.getParentFile();
+            if (parent == null) return new RootDeleteResult(null, false, -3);
+            File target = new File(parent, requested).getCanonicalFile();
+            if (!parent.equals(target.getParentFile())) {
+                return new RootDeleteResult(target.getAbsolutePath(), false, -4);
+            }
+            if (actual.equals(target)) {
+                // MediaProvider did not uniquify this download; never delete the just-published file.
+                return new RootDeleteResult(target.getAbsolutePath(), false, 0);
+            }
+
+            String command = "rm -f -- " + shellQuote(target.getAbsolutePath());
+            Process process = new ProcessBuilder("su", "-c", command)
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return new RootDeleteResult(target.getAbsolutePath(), false, -5);
+            }
+            int exit = process.exitValue();
+            boolean gone = !target.exists();
+            return new RootDeleteResult(target.getAbsolutePath(), exit == 0 && gone, exit);
+        } catch (Throwable t) {
+            hooks.warn("ChromeX root target cleanup failed: " + t.getClass().getSimpleName()
+                    + ":" + (t.getMessage() == null ? "" : t.getMessage()));
+            return new RootDeleteResult(null, false, -6);
+        }
+    }
+
+    /** Best-effort cleanup for stale MediaStore rows after the physical replacement succeeds. */
     private int deletePreviousExactName(String displayName, String keepUri) {
         ContentResolver resolver = runtime.application.getContentResolver();
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         int removed = 0;
-        String[] projection = {
-                MediaStore.MediaColumns._ID,
-                MediaStore.MediaColumns.DISPLAY_NAME
-        };
+        String[] projection = {MediaStore.MediaColumns._ID};
         try (Cursor cursor = resolver.query(collection, projection,
                 MediaStore.MediaColumns.DISPLAY_NAME + "=?",
                 new String[]{displayName}, null)) {
@@ -141,12 +210,9 @@ final class DownloadCollectionConflictHooks {
                 if (sameUri(candidate.toString(), keepUri)) continue;
                 try {
                     removed += resolver.delete(candidate, null, null);
-                } catch (Throwable t) {
-                    hooks.warn("ChromeX could not delete previous MediaStore item "
-                            + candidate + ": " + t.getClass().getSimpleName());
-                }
+                } catch (Throwable ignored) {}
             }
-        }
+        } catch (Throwable ignored) {}
         return removed;
     }
 
@@ -179,10 +245,52 @@ final class DownloadCollectionConflictHooks {
         }
     }
 
+    private static String safeName(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String name = DownloadNamePolicy.fileNameOnly(raw);
+        if (name == null || name.isBlank() || ".".equals(name) || "..".equals(name)) return null;
+        return name;
+    }
+
+    private static String columnString(Cursor cursor, String column) {
+        int index = cursor.getColumnIndex(column);
+        if (index < 0 || cursor.isNull(index)) return null;
+        String value = cursor.getString(index);
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
     private static boolean sameUri(String a, String b) {
         if (a == null || b == null) return false;
         if (a.equals(b)) return true;
         try { return Uri.parse(a).normalizeScheme().equals(Uri.parse(b).normalizeScheme()); }
         catch (Throwable ignored) { return false; }
+    }
+
+    private static final class PhysicalItem {
+        final String path;
+        final String displayName;
+        final String relativePath;
+
+        PhysicalItem(String path, String displayName, String relativePath) {
+            this.path = path;
+            this.displayName = displayName;
+            this.relativePath = relativePath;
+        }
+    }
+
+    private static final class RootDeleteResult {
+        final String target;
+        final boolean deleted;
+        final int exitCode;
+
+        RootDeleteResult(String target, boolean deleted, int exitCode) {
+            this.target = target;
+            this.deleted = deleted;
+            this.exitCode = exitCode;
+        }
     }
 }
