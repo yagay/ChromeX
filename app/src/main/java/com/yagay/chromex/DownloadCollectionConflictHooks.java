@@ -30,6 +30,14 @@ final class DownloadCollectionConflictHooks {
     private static final String BRIDGE =
             "org.chromium.components.download.DownloadCollectionBridge";
 
+    private static final String[] SU_CANDIDATES = {
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/debug_ramdisk/su",
+            "/data/adb/ksu/bin/su"
+    };
+
     /** intermediate/published content Uri -> originally requested display name. */
     private static final Map<String, String> REQUESTED_NAMES = new ConcurrentHashMap<>();
 
@@ -120,6 +128,7 @@ final class DownloadCollectionConflictHooks {
                                 + " actual=" + (physical.path == null ? "<unknown>" : physical.path)
                                 + " display=" + (physical.displayName == null ? "<unknown>" : physical.displayName)
                                 + " rootTarget=" + (root.target == null ? "<none>" : root.target)
+                                + " su=" + (root.suPath == null ? "<none>" : root.suPath)
                                 + " rootDeleted=" + root.deleted
                                 + " rootExit=" + root.exitCode
                                 + " renamed=" + renamed
@@ -159,38 +168,71 @@ final class DownloadCollectionConflictHooks {
 
     private RootDeleteResult freeRequestedSibling(PhysicalItem physical, String requested) {
         if (physical.path == null || physical.path.isBlank()) {
-            return new RootDeleteResult(null, false, -2);
+            return new RootDeleteResult(null, null, false, -2);
         }
+        String targetPath = null;
         try {
             File actual = new File(physical.path).getCanonicalFile();
             File parent = actual.getParentFile();
-            if (parent == null) return new RootDeleteResult(null, false, -3);
+            if (parent == null) return new RootDeleteResult(null, null, false, -3);
             File target = new File(parent, requested).getCanonicalFile();
+            targetPath = target.getAbsolutePath();
             if (!parent.equals(target.getParentFile())) {
-                return new RootDeleteResult(target.getAbsolutePath(), false, -4);
+                return new RootDeleteResult(targetPath, null, false, -4);
             }
             if (actual.equals(target)) {
                 // MediaProvider did not uniquify this download; never delete the just-published file.
-                return new RootDeleteResult(target.getAbsolutePath(), false, 0);
+                return new RootDeleteResult(targetPath, null, false, 0);
             }
 
-            String command = "rm -f -- " + shellQuote(target.getAbsolutePath());
-            Process process = new ProcessBuilder("su", "-c", command)
+            String su = resolveSuExecutable();
+            if (su == null) {
+                hooks.warn("ChromeX root target cleanup failed: no su executable visible to Chrome process");
+                return new RootDeleteResult(targetPath, null, false, -7);
+            }
+
+            String command = "rm -f -- " + shellQuote(targetPath);
+            Process process = new ProcessBuilder(su, "-c", command)
                     .redirectErrorStream(true)
                     .start();
             boolean finished = process.waitFor(5, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                return new RootDeleteResult(target.getAbsolutePath(), false, -5);
+                return new RootDeleteResult(targetPath, su, false, -5);
             }
             int exit = process.exitValue();
             boolean gone = !target.exists();
-            return new RootDeleteResult(target.getAbsolutePath(), exit == 0 && gone, exit);
+            return new RootDeleteResult(targetPath, su, exit == 0 && gone, exit);
         } catch (Throwable t) {
             hooks.warn("ChromeX root target cleanup failed: " + t.getClass().getSimpleName()
                     + ":" + (t.getMessage() == null ? "" : t.getMessage()));
-            return new RootDeleteResult(null, false, -6);
+            return new RootDeleteResult(targetPath, null, false, -6);
         }
+    }
+
+    private String resolveSuExecutable() {
+        for (String candidate : SU_CANDIDATES) {
+            try {
+                File file = new File(candidate);
+                if (file.isFile() && file.canExecute()) return candidate;
+            } catch (Throwable ignored) {}
+        }
+
+        // Last resort: ask Android's shell resolver through an absolute /system/bin/sh path.
+        try {
+            Process process = new ProcessBuilder("/system/bin/sh", "-c", "command -v su")
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = process.waitFor(2, TimeUnit.SECONDS);
+            if (finished && process.exitValue() == 0) {
+                byte[] bytes = process.getInputStream().readAllBytes();
+                String resolved = new String(bytes).trim();
+                if (!resolved.isBlank()) return resolved;
+            } else if (!finished) {
+                process.destroyForcibly();
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     /** Best-effort cleanup for stale MediaStore rows after the physical replacement succeeds. */
@@ -284,11 +326,13 @@ final class DownloadCollectionConflictHooks {
 
     private static final class RootDeleteResult {
         final String target;
+        final String suPath;
         final boolean deleted;
         final int exitCode;
 
-        RootDeleteResult(String target, boolean deleted, int exitCode) {
+        RootDeleteResult(String target, String suPath, boolean deleted, int exitCode) {
             this.target = target;
+            this.suPath = suPath;
             this.deleted = deleted;
             this.exitCode = exitCode;
         }
