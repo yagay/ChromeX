@@ -23,7 +23,7 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installReplacementDownloader();
+        installNativeConflictPolicy();
         installTabs();
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
@@ -31,20 +31,20 @@ final class ChromiumFeatureOrchestrator {
     }
 
     /**
-     * Standard Chrome downloads are native DownloadItems, so replacing only
-     * DownloadManagerBridge.enqueueNewDownload does not affect the main download path.
+     * Same-name overwrite is implemented only at Chromium's native reservation boundary.
      *
-     * <p>ChromeX now hooks DownloadManagerService.onDownloadItemCreated(), cancels the just-created
-     * native DownloadItem through Chrome's own cancelDownload JNI path, suppresses publishing that
-     * cancelled item to the Java UI, and re-enqueues the GET request through Android
-     * DownloadManager. The older DownloadManagerBridge hook remains installed only as a fallback for
-     * the subset of downloads Chromium explicitly delegates to Android DownloadManager.</p>
+     * <p>The former duplicate-dialog normalizer, history deduper, Java DownloadManager replacement,
+     * and native-cancel/re-download experiment are intentionally not installed. Chrome keeps its own
+     * downloader, cookies, POST/range/resume support, Safe Browsing, notifications and history;
+     * ChromeX changes only FilenameConflictAction before GetReservedPath executes.</p>
      */
-    private void installReplacementDownloader() {
-        install("ChromeX native download takeover", () ->
-                new ChromeXNativeDownloadTakeover(runtime, hooks, prefs).install());
-        install("ChromeX Android download bridge fallback", () ->
-                new ChromeXDownloadManagerBridge(runtime, hooks, prefs).install());
+    private void installNativeConflictPolicy() {
+        if (!Config.get(prefs, Config.OVERWRITE_DUPLICATE)) {
+            skip("native same-name overwrite", "disabled by user");
+            return;
+        }
+        install("native same-name overwrite", () ->
+                NativeDownloadConflictBridge.install(runtime, hooks));
     }
 
     private void installTabs() {
