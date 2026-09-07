@@ -30,6 +30,11 @@
             android:exported="true"
             android:grantUriPermissions="true" />
 
+        <provider
+            android:name=".RootBridgeProvider"
+            android:authorities="com.yagay.chromex.rootbridge"
+            android:exported="true" />
+
         <service
             android:name=".ChromeXDownloadService"
             android:exported="true"
