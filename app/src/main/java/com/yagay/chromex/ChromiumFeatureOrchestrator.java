@@ -34,7 +34,8 @@ final class ChromiumFeatureOrchestrator {
     /**
      * Same-name overwrite implementation restored from eceff5b20cb75749f8efdf8de9a327602dd263e3.
      * Adaptive Chromium installs its OfflineItem capture first, then consumes the duplicate dialog.
-     * Verified Chrome builds use the original SameNameOverwriteHooks implementation from that commit.
+     * Verified Chrome builds use the same completion-after-download model, but read DownloadInfo
+     * through the shared semantic accessor so R8-renamed fields do not break normalization.
      */
     private void installSameNameOverwriteFromEceff5b() {
         if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 60)
@@ -48,7 +49,7 @@ final class ChromiumFeatureOrchestrator {
                 new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
                 new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
             } else {
-                new SameNameOverwriteHooks(runtime, hooks, prefs).install();
+                new SameNameOverwriteHooks(profile, runtime, hooks, prefs).install();
             }
         });
     }
