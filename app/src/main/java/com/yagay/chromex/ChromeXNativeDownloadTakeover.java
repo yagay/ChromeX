@@ -1,35 +1,36 @@
 package com.yagay.chromex;
 
-import android.app.DownloadManager;
-import android.content.Context;
-import android.content.SharedPreferences;
-import android.net.Uri;
-import android.os.Environment;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ResultReceiver;
 
-import java.io.File;
 import java.lang.reflect.Method;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Takes ownership of downloads created by Chromium's native download stack.
+ * Hands reconstructible native Chrome downloads to ChromeX's own downloader.
  *
- * <p>Standard Chrome downloads are normally created in native code and only then mirrored into
- * Java through DownloadManagerService.onDownloadItemCreated(). That is the first stable Java
- * boundary where ChromeX has both the real DownloadItem/GUID and the full DownloadInfo. ChromeX
- * cancels the native item there and re-enqueues the request through Android DownloadManager.</p>
+ * <p>The Chrome item is NOT cancelled immediately. ChromeXDownloadService first opens the same GET
+ * request and only reports RESULT_ACCEPTED after receiving a successful HTTP response and opening
+ * its MediaStore destination. Only then do we cancel/remove Chrome's native DownloadItem. If the
+ * replacement cannot authenticate or otherwise fails before acceptance, Chrome continues normally.</p>
  */
 final class ChromeXNativeDownloadTakeover {
     private static final String SERVICE =
             "org.chromium.chrome.browser.download.DownloadManagerService";
-    private static final Set<String> CLAIMED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> PENDING = ConcurrentHashMap.newKeySet();
 
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
-    private final SharedPreferences prefs;
+    private final android.content.SharedPreferences prefs;
+    private final Handler main = new Handler(Looper.getMainLooper());
 
     ChromeXNativeDownloadTakeover(ChromeRuntime runtime, HookSupport hooks,
-                                  SharedPreferences prefs) {
+                                  android.content.SharedPreferences prefs) {
         this.runtime = runtime;
         this.hooks = hooks;
         this.prefs = prefs;
@@ -40,59 +41,83 @@ final class ChromeXNativeDownloadTakeover {
         try {
             service = Reflect.cls(runtime.classLoader, SERVICE);
         } catch (Throwable t) {
-            hooks.warn("ChromeX native takeover unavailable: " + t.getClass().getSimpleName());
+            hooks.warn("ChromeX downloader takeover unavailable: " + t.getClass().getSimpleName());
             return;
         }
-
         if (Reflect.named(service, "onDownloadItemCreated").isEmpty()) {
-            hooks.warn("ChromeX native takeover: onDownloadItemCreated unresolved");
+            hooks.warn("ChromeX downloader takeover: onDownloadItemCreated unresolved");
             return;
         }
 
         hooks.all(runtime.classLoader, SERVICE, "onDownloadItemCreated",
-                "chromex:native-download:takeover-created", chain -> {
+                "chromex:downloader:takeover-created", chain -> {
                     Object item = firstDownloadItem(chain.getArgs().toArray());
-                    if (item == null) return chain.proceed();
-                    if (!takeOver(chain.getThisObject(), item)) return chain.proceed();
-                    // Do not publish the now-cancelled native item into Chrome's Java download UI.
-                    return null;
+                    if (item != null) offer(chain.getThisObject(), item);
+                    // Let Chrome publish/continue for now. It is cancelled only after ChromeX confirms
+                    // that the replacement HTTP request is actually downloadable.
+                    return chain.proceed();
                 });
-        hooks.info("ChromeX native download takeover installed at DownloadManagerService.onDownloadItemCreated");
+        hooks.info("ChromeX downloader takeover installed at DownloadManagerService.onDownloadItemCreated");
     }
 
-    private boolean takeOver(Object service, Object item) {
-        Object info;
-        try { info = Reflect.call(item, "getDownloadInfo"); }
-        catch (Throwable t) { return false; }
-        if (info == null) return false;
-
+    private void offer(Object service, Object item) {
+        Object info = callOrNull(item, "getDownloadInfo");
+        if (info == null) return;
         RequestValues values = readInfo(info);
-        if (!values.usable()) {
-            hooks.warn("ChromeX native takeover skipped unresolved DownloadInfo");
-            return false;
-        }
-        if (!values.isGet) {
-            hooks.warn("ChromeX native takeover skipped non-GET download: " + values.fileName);
-            return false;
-        }
+        if (!values.usable() || !values.isGet) return;
 
         String guid = stringCall(item, "getId");
-        if (guid == null || guid.isBlank() || !CLAIMED.add(guid)) return false;
-
+        if (guid == null || guid.isBlank() || !PENDING.add(guid)) return;
         Object contentId = callOrNull(item, "getContentId");
         Object otrProfileId = callOrNull(info, "getOtrProfileId");
-        if (contentId == null || !cancelNative(service, contentId, otrProfileId)) {
-            CLAIMED.remove(guid);
-            hooks.warn("ChromeX native takeover could not cancel native item: " + guid);
-            return false;
+        if (contentId == null) {
+            PENDING.remove(guid);
+            return;
         }
 
-        // Removing the cancelled native record prevents it from reappearing in Chrome's history.
-        removeNativeRecord(service, guid, otrProfileId);
-        enqueue(values, guid);
-        hooks.info("ChromeX native download claimed: guid=" + guid
-                + " name=" + values.fileName + " url=" + values.url);
-        return true;
+        ResultReceiver receiver = new ResultReceiver(main) {
+            @Override protected void onReceiveResult(int resultCode, Bundle resultData) {
+                try {
+                    if (resultCode == ChromeXDownloadService.RESULT_ACCEPTED) {
+                        if (cancelNative(service, contentId, otrProfileId)) {
+                            removeNativeRecord(service, guid, otrProfileId);
+                            hooks.info("ChromeX downloader claimed Chrome task: guid=" + guid
+                                    + " name=" + values.fileName);
+                        } else {
+                            hooks.warn("ChromeX downloader accepted but Chrome cancel failed: " + guid);
+                        }
+                    } else {
+                        String reason = resultData == null ? null : resultData.getString("reason");
+                        hooks.info("ChromeX downloader handed task back to Chrome: guid=" + guid
+                                + " reason=" + reason);
+                    }
+                } finally {
+                    PENDING.remove(guid);
+                }
+            }
+        };
+
+        Intent intent = new Intent(ChromeXDownloadService.ACTION_DOWNLOAD)
+                .setComponent(new ComponentName("com.yagay.chromex",
+                        "com.yagay.chromex.ChromeXDownloadService"))
+                .putExtra(ChromeXDownloadService.EXTRA_URL, values.url)
+                .putExtra(ChromeXDownloadService.EXTRA_NAME, values.fileName)
+                .putExtra(ChromeXDownloadService.EXTRA_MIME, values.mime)
+                .putExtra(ChromeXDownloadService.EXTRA_COOKIE, values.cookie)
+                .putExtra(ChromeXDownloadService.EXTRA_REFERER, values.referrer)
+                .putExtra(ChromeXDownloadService.EXTRA_USER_AGENT, values.userAgent)
+                .putExtra(ChromeXDownloadService.EXTRA_GUID, guid)
+                .putExtra(ChromeXDownloadService.EXTRA_RECEIVER, receiver);
+        try {
+            runtime.application.startForegroundService(intent);
+            hooks.info("ChromeX downloader offered Chrome task: guid=" + guid
+                    + " name=" + values.fileName
+                    + " auth=" + ((values.cookie != null || values.userAgent != null) ? "metadata" : "limited"));
+        } catch (Throwable t) {
+            PENDING.remove(guid);
+            hooks.warn("ChromeX downloader service start failed; Chrome keeps task: "
+                    + t.getClass().getSimpleName());
+        }
     }
 
     private boolean cancelNative(Object service, Object contentId, Object otrProfileId) {
@@ -100,7 +125,7 @@ final class ChromeXNativeDownloadTakeover {
             invokeCompatible(service, "cancelDownload", contentId, otrProfileId);
             return true;
         } catch (Throwable first) {
-            hooks.warn("ChromeX native cancel failed: " + first.getClass().getSimpleName());
+            hooks.warn("ChromeX downloader native cancel failed: " + first.getClass().getSimpleName());
             return false;
         }
     }
@@ -108,57 +133,6 @@ final class ChromeXNativeDownloadTakeover {
     private void removeNativeRecord(Object service, String guid, Object otrProfileId) {
         try { invokeCompatible(service, "removeDownload", guid, otrProfileId, Boolean.FALSE); }
         catch (Throwable ignored) {}
-    }
-
-    private void enqueue(RequestValues values, String guid) {
-        Thread worker = new Thread(() -> {
-            long id = -1L;
-            try {
-                Uri uri = Uri.parse(values.url);
-                String scheme = uri.getScheme();
-                if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
-                    throw new IllegalArgumentException("unsupported scheme " + scheme);
-                }
-
-                DownloadManager.Request request = new DownloadManager.Request(uri);
-                if (values.mime != null) request.setMimeType(values.mime);
-                if (values.fileName != null) {
-                    request.setTitle(values.fileName);
-                    request.setDescription(values.description == null
-                            ? values.fileName : values.description);
-                }
-                addHeader(request, "Cookie", values.cookie);
-                addHeader(request, "Referer", values.referrer);
-                addHeader(request, "User-Agent", values.userAgent);
-
-                String name = safeFileName(values.fileName);
-                if (name == null) throw new IllegalStateException("filename missing");
-                File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                File target = new File(dir, name).getCanonicalFile();
-                if (!sameDirectory(dir, target)) throw new IllegalArgumentException("unsafe filename");
-
-                if (Config.get(prefs, Config.OVERWRITE_DUPLICATE) && target.exists()) {
-                    if (target.isDirectory() || !target.delete()) {
-                        throw new IllegalStateException("cannot replace existing target");
-                    }
-                }
-
-                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
-                request.setNotificationVisibility(
-                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-
-                DownloadManager manager = (DownloadManager) runtime.application
-                        .getSystemService(Context.DOWNLOAD_SERVICE);
-                if (manager == null) throw new IllegalStateException("DownloadManager unavailable");
-                id = manager.enqueue(request);
-                hooks.info("ChromeX replacement download started: guid=" + guid
-                        + " systemId=" + id + " target=" + target.getAbsolutePath());
-            } catch (Throwable t) {
-                hooks.error("ChromeX replacement download enqueue failed: " + values.fileName, t);
-            }
-        }, "ChromeX-native-download");
-        worker.setDaemon(true);
-        worker.start();
     }
 
     private Object firstDownloadItem(Object[] args) {
@@ -173,20 +147,17 @@ final class ChromeXNativeDownloadTakeover {
     private RequestValues readInfo(Object info) {
         String url = urlSpec(callOrNull(info, "getUrl"));
         String fileName = stringCall(info, "getFileName");
-        String description = stringCall(info, "getDescription");
         String mime = stringCall(info, "getMimeType");
         String cookie = stringCall(info, "getCookie");
         String referrer = urlSpec(callOrNull(info, "getReferrer"));
         String userAgent = stringCall(info, "getUserAgent");
         boolean isGet = booleanCall(info, "isGETRequest", true);
-
-        // Exact/structural fallback for obfuscated builds.
         if (fileName == null || mime == null) {
             DownloadInfoAccessor.Values values = DownloadInfoAccessor.read(info, null);
             if (fileName == null) fileName = values.name;
             if (mime == null) mime = values.mime;
         }
-        return new RequestValues(url, fileName, description, mime, cookie, referrer, userAgent, isGet);
+        return new RequestValues(url, fileName, mime, cookie, referrer, userAgent, isGet);
     }
 
     private static Object callOrNull(Object owner, String method) {
@@ -226,8 +197,7 @@ final class ChromeXNativeDownloadTakeover {
                 boolean ok = true;
                 for (int i = 0; i < p.length; i++) {
                     if (args[i] == null) continue;
-                    Class<?> boxed = box(p[i]);
-                    if (!boxed.isInstance(args[i])) { ok = false; break; }
+                    if (!box(p[i]).isInstance(args[i])) { ok = false; break; }
                 }
                 if (!ok) continue;
                 method.setAccessible(true);
@@ -251,41 +221,19 @@ final class ChromeXNativeDownloadTakeover {
         return type;
     }
 
-    private static void addHeader(DownloadManager.Request request, String name, String value) {
-        if (value == null || value.isBlank()) return;
-        try { request.addRequestHeader(name, value); } catch (Throwable ignored) {}
-    }
-
-    private static String safeFileName(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        String name = DownloadNamePolicy.fileNameOnly(raw);
-        if (name == null || name.isBlank() || ".".equals(name) || "..".equals(name)) return null;
-        return name;
-    }
-
-    private static boolean sameDirectory(File directory, File target) {
-        try {
-            File dir = directory.getCanonicalFile();
-            File parent = target.getCanonicalFile().getParentFile();
-            return parent != null && parent.equals(dir);
-        } catch (Throwable ignored) { return false; }
-    }
-
     private static final class RequestValues {
         final String url;
         final String fileName;
-        final String description;
         final String mime;
         final String cookie;
         final String referrer;
         final String userAgent;
         final boolean isGet;
 
-        RequestValues(String url, String fileName, String description, String mime,
-                      String cookie, String referrer, String userAgent, boolean isGet) {
+        RequestValues(String url, String fileName, String mime, String cookie,
+                      String referrer, String userAgent, boolean isGet) {
             this.url = url;
             this.fileName = fileName;
-            this.description = description;
             this.mime = mime;
             this.cookie = cookie;
             this.referrer = referrer;
