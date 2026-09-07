@@ -23,7 +23,7 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installChromeXDownloader();
+        installSameNameOverwrite();
         installTabs();
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
@@ -31,18 +31,27 @@ final class ChromiumFeatureOrchestrator {
     }
 
     /**
-     * ChromeX owns reconstructible HTTP/HTTPS GET downloads instead of patching Chrome's filename
-     * conflict policy. The replacement downloader proves that the remote request is accepted before
-     * cancelling Chrome's native DownloadItem. Authenticated/special downloads that cannot be
-     * reconstructed are automatically left with Chrome.
+     * Keep Chrome's native downloader and remove both duplicate-name barriers that can force a
+     * generated "(1)" filename on Android:
+     *
+     * <ol>
+     *   <li>DownloadCollectionBridge.fileNameExists(String) querying the Android download
+     *       collection/MediaStore.</li>
+     *   <li>Chromium native FilenameConflictAction at DownloadPathReservationTracker.</li>
+     * </ol>
+     *
+     * <p>The experimental ChromeX re-download takeover is intentionally not installed while this
+     * path is tested, so diagnostics cannot be confused by two competing download owners.</p>
      */
-    private void installChromeXDownloader() {
+    private void installSameNameOverwrite() {
         if (!Config.get(prefs, Config.OVERWRITE_DUPLICATE)) {
-            skip("ChromeX downloader takeover", "disabled by user");
+            skip("same-name overwrite", "disabled by user");
             return;
         }
-        install("ChromeX downloader takeover", () ->
-                new ChromeXNativeDownloadTakeover(runtime, hooks, prefs).install());
+        install("DownloadCollection duplicate bypass", () ->
+                new DownloadCollectionConflictHooks(runtime, hooks, prefs).install());
+        install("native conflict policy", () ->
+                NativeDownloadConflictBridge.install(runtime, hooks));
     }
 
     private void installTabs() {
