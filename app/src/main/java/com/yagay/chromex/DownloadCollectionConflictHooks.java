@@ -11,6 +11,8 @@ import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import io.github.libxposed.api.XposedInterface;
+
 /**
  * Controls Chromium's Android DownloadCollection duplicate handling.
  *
@@ -167,17 +169,7 @@ final class DownloadCollectionConflictHooks {
         return Config.get(prefs, Config.OVERWRITE_DUPLICATE);
     }
 
-    private static String stringArg(Object chainObject, int index) {
-        // Kept only to prevent accidental overload selection; actual hook chains use the overload below.
-        return null;
-    }
-
-    private static String stringArg(io.github.libxposed.api.XposedInterface.BeforeHookCallback unused,
-                                    int index) {
-        return null;
-    }
-
-    private static String stringArg(HookSupport.Chain chain, int index) {
+    private static String stringArg(XposedInterface.Chain chain, int index) {
         try {
             if (chain.getArgs().size() <= index) return null;
             Object value = chain.getArg(index);
