@@ -25,6 +25,7 @@ final class ChromeDownloadListController {
     private static final String DOWNLOAD_ITEM = ChromiumSemanticAnchors.DOWNLOAD_ITEM;
     private static final long[] RECONCILE_DELAYS_MS = {0L, 150L, 600L, 1800L};
     private static final int MAX_LISTS = 24;
+    private static final int MAX_SEEN_ROWS = 512;
 
     private final ChromiumProfile profile;
     private final ChromeRuntime runtime;
@@ -32,7 +33,10 @@ final class ChromeDownloadListController {
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Object listLock = new Object();
+    private final Object rowLock = new Object();
     private final ArrayList<WeakReference<List<?>>> observedLists = new ArrayList<>();
+    private final HashMap<String, SeenRow> seenRows = new HashMap<>();
+    private long seenSequence;
     private Class<?> infoType;
     private Class<?> itemType;
     private Class<?> serviceType;
@@ -93,8 +97,14 @@ final class ChromeDownloadListController {
         if (serviceType == null || Reflect.named(serviceType, method).isEmpty()) return;
         hooks.all(runtime.classLoader, Chrome145.DOWNLOAD_MANAGER_SERVICE, method,
                 "chromex:list-controller:item:" + method, chain -> {
-                    if (enabled()) rewriteArguments(chain.getArgs().toArray());
-                    return chain.proceed();
+                    Object[] args = chain.getArgs().toArray();
+                    Object item = enabled() ? firstDownloadItem(args) : null;
+                    if (enabled()) rewriteArguments(args);
+                    Object result = chain.proceed();
+                    if (enabled() && item != null) {
+                        trackVisibleRow(chain.getThisObject(), item, method);
+                    }
+                    return result;
                 });
     }
 
@@ -122,6 +132,75 @@ final class ChromeDownloadListController {
             if (enabled() && result != null) rewriteObject(result);
             return result;
         });
+    }
+
+    private Object firstDownloadItem(Object[] args) {
+        if (args == null || itemType == null) return null;
+        for (Object arg : args) {
+            if (arg != null && itemType.isInstance(arg)) return arg;
+        }
+        return null;
+    }
+
+    /**
+     * Chrome 152 updates the visible downloads page incrementally through created/updated callbacks.
+     * A successful same-name replacement can therefore leave the old row in the current UI even
+     * though the persistent history is already correct. Keep a process-local logical-path -> GUID
+     * winner and broadcast only the losing GUID through Chrome's own onDownloadItemRemoved callback.
+     * This changes presentation state only; it does not remove a native DownloadItem or delete a file.
+     */
+    private void trackVisibleRow(Object service, Object item, String source) {
+        String key = logicalKey(item);
+        String guid = downloadGuid(item);
+        if (key == null || guid == null) return;
+
+        long time = timestamp(item);
+        SeenRow loser = null;
+        SeenRow winner;
+        synchronized (rowLock) {
+            SeenRow candidate = new SeenRow(guid, time, ++seenSequence);
+            SeenRow previous = seenRows.get(key);
+            if (previous == null || previous.guid.equals(guid)) {
+                if (previous != null && previous.time > candidate.time) {
+                    candidate = new SeenRow(guid, previous.time, candidate.sequence);
+                }
+                seenRows.put(key, candidate);
+                trimSeenRowsLocked();
+                return;
+            }
+
+            winner = newer(previous, candidate);
+            loser = winner == previous ? candidate : previous;
+            seenRows.put(key, winner);
+            trimSeenRowsLocked();
+        }
+
+        if (loser != null && service != null) {
+            try {
+                Reflect.call(service, "onDownloadItemRemoved", loser.guid);
+                hooks.info("download list controller removed stale row: guid=" + loser.guid
+                        + " keep=" + winner.guid
+                        + " source=" + source
+                        + " key=" + key);
+            } catch (Throwable t) {
+                hooks.warn("download list controller stale-row notify failed: "
+                        + t.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private void trimSeenRowsLocked() {
+        if (seenRows.size() <= MAX_SEEN_ROWS) return;
+        seenRows.clear();
+    }
+
+    private String downloadGuid(Object item) {
+        try {
+            Object value = Reflect.call(item, "getId");
+            return value instanceof String && !((String) value).isBlank() ? (String) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private void sanitizeArguments(Object[] args) {
@@ -212,6 +291,12 @@ final class ChromeDownloadListController {
     }
 
     private Candidate newer(Candidate a, Candidate b) {
+        if (b.time > a.time) return b;
+        if (b.time < a.time) return a;
+        return b.sequence >= a.sequence ? b : a;
+    }
+
+    private SeenRow newer(SeenRow a, SeenRow b) {
         if (b.time > a.time) return b;
         if (b.time < a.time) return a;
         return b.sequence >= a.sequence ? b : a;
@@ -342,6 +427,18 @@ final class ChromeDownloadListController {
         final long sequence;
         Candidate(Object value, long time, long sequence) {
             this.value = value;
+            this.time = time;
+            this.sequence = sequence;
+        }
+    }
+
+    private static final class SeenRow {
+        final String guid;
+        final long time;
+        final long sequence;
+
+        SeenRow(String guid, long time, long sequence) {
+            this.guid = guid;
             this.time = time;
             this.sequence = sequence;
         }
