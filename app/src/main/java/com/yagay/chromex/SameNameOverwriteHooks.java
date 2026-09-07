@@ -38,12 +38,15 @@ final class SameNameOverwriteHooks {
     private static final Object LOCK = new Object();
     private static final List<PendingTarget> PENDING = new ArrayList<>();
 
+    private final ChromiumProfile profile;
     private final ChromeRuntime runtime;
     private final HookSupport hooks;
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
 
-    SameNameOverwriteHooks(ChromeRuntime runtime, HookSupport hooks, SharedPreferences prefs) {
+    SameNameOverwriteHooks(ChromiumProfile profile, ChromeRuntime runtime,
+                           HookSupport hooks, SharedPreferences prefs) {
+        this.profile = profile;
         this.runtime = runtime;
         this.hooks = hooks;
         this.prefs = prefs;
@@ -97,7 +100,7 @@ final class SameNameOverwriteHooks {
 
         hooks.all(runtime.classLoader, Chrome145.DOWNLOAD_CONTROLLER, "onDownloadCompleted",
                 "chromex:download:overwrite-completed", chain -> {
-                    Object info = findDownloadInfo(chain.getArgs().toArray());
+                    Object info = DownloadInfoAccessor.find(chain.getArgs().toArray(), runtime.classLoader);
                     Object result = chain.proceed();
                     if (Config.get(prefs, Config.OVERWRITE_DUPLICATE) && info != null) {
                         try { normalize(info, 0); }
@@ -107,35 +110,24 @@ final class SameNameOverwriteHooks {
                 });
     }
 
-    private Object findDownloadInfo(Object[] args) {
-        try {
-            Class<?> type = Reflect.cls(runtime.classLoader, Chrome145.DOWNLOAD_INFO);
-            for (Object arg : args) {
-                if (arg != null && type.isAssignableFrom(arg.getClass())) return arg;
-            }
-        } catch (Throwable ignored) {}
-        return null;
-    }
-
     private void normalize(Object info, int attempt) {
         if (info == null || pendingCount() == 0) return;
 
-        String path = stringAccessor(info, "getFilePath",
-                Chrome152.matches(runtime) ? Chrome152.DOWNLOAD_INFO_PATH : null);
-        String name = stringAccessor(info, "getFileName",
-                Chrome152.matches(runtime) ? Chrome152.DOWNLOAD_INFO_NAME : null);
-        String alt = Chrome152.matches(runtime) ? stringField(info, "f") : null;
+        DownloadInfoAccessor.Values values = DownloadInfoAccessor.read(info, profile);
+        String path = values.path;
+        String name = values.name;
         File direct = sharedFile(path);
 
-        PendingTarget pending = takeMatching(direct, path, name, alt);
+        PendingTarget pending = takeMatching(direct, path, name);
         if (pending == null) {
             if (attempt == 0) hooks.warn("same-name overwrite completion unmatched: path="
                     + safeValue(path) + " name=" + safeValue(name)
+                    + " metadata=" + values.detail
                     + " pending=" + pendingCount());
             return;
         }
 
-        File actual = resolveActualFile(pending, direct, path, name, alt);
+        File actual = resolveActualFile(pending, direct, path, name);
         if (actual == null) {
             restorePending(pending);
             if (attempt < MAX_RESOLVE_RETRIES) {
@@ -143,6 +135,7 @@ final class SameNameOverwriteHooks {
             } else {
                 hooks.warn("same-name overwrite actual file unresolved: name=" + pending.baseName
                         + " reportedPath=" + safeValue(path)
+                        + " metadata=" + values.detail
                         + " dirs=" + directorySummary(pending, direct));
             }
             return;
@@ -164,8 +157,9 @@ final class SameNameOverwriteHooks {
         }
 
         if (sameFile(actual, desired)) {
-            updateDownloadInfo(info, desired);
-            hooks.info("same-name overwrite already original: " + desired.getAbsolutePath());
+            DownloadInfoAccessor.rewrite(info, profile, desired);
+            hooks.info("same-name overwrite already original: " + desired.getAbsolutePath()
+                    + " metadata=" + values.detail);
             return;
         }
 
@@ -185,14 +179,15 @@ final class SameNameOverwriteHooks {
         }
 
         DownloadNormalizationRegistry.register(oldActual, desired);
-        updateDownloadInfo(info, desired);
+        boolean metadataChanged = DownloadInfoAccessor.rewrite(info, profile, desired);
         try {
             MediaScannerConnection.scanFile(runtime.application,
-                    new String[]{desired.getAbsolutePath()}, null, null);
+                    new String[]{oldActual.getAbsolutePath(), desired.getAbsolutePath()}, null, null);
         } catch (Throwable ignored) {}
         hooks.info("same-name overwrite normalized: " + oldActual.getAbsolutePath()
                 + " -> " + desired.getAbsolutePath()
-                + " via " + replace.detail + " attempt=" + attempt);
+                + " via " + replace.detail + " attempt=" + attempt
+                + " metadata=" + values.detail + " metadataChanged=" + metadataChanged);
     }
 
     private File resolveActualFile(PendingTarget pending, File direct, String... reported) {
@@ -319,13 +314,6 @@ final class SameNameOverwriteHooks {
         } catch (AtomicMoveNotSupportedException ignored) {}
         if (replace) Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING);
         else Files.move(from.toPath(), to.toPath());
-    }
-
-    private void updateDownloadInfo(Object info, File desired) {
-        if (info == null || desired == null || !Chrome152.matches(runtime)) return;
-        try { Reflect.set(info, Chrome152.DOWNLOAD_INFO_PATH, desired.getPath()); } catch (Throwable ignored) {}
-        try { Reflect.set(info, Chrome152.DOWNLOAD_INFO_NAME, desired.getName()); } catch (Throwable ignored) {}
-        try { Reflect.set(info, "f", desired.getName()); } catch (Throwable ignored) {}
     }
 
     private PendingTarget remember(long callbackId, String baseName, File hintDirectory) {
@@ -508,22 +496,6 @@ final class SameNameOverwriteHooks {
         }
         if (found == null) return 0L;
         try { return found.getLong(bridge); } catch (Throwable ignored) { return 0L; }
-    }
-
-    private static String stringAccessor(Object value, String getter, String fallbackField) {
-        if (value == null) return null;
-        try {
-            Object result = Reflect.call(value, getter);
-            if (result instanceof String) return (String) result;
-        } catch (Throwable ignored) {}
-        return fallbackField == null ? null : stringField(value, fallbackField);
-    }
-
-    private static String stringField(Object value, String field) {
-        try {
-            Object result = Reflect.get(value, field);
-            return result instanceof String ? (String) result : null;
-        } catch (Throwable ignored) { return null; }
     }
 
     private static File sharedFile(String raw) {
