@@ -4,18 +4,15 @@ import android.content.ContentResolver;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -24,22 +21,17 @@ import io.github.libxposed.api.XposedInterface;
  *
  * <p>Chromium can keep the requested logical name while MediaProvider still uniquifies the real
  * file at pending-row creation. After publish succeeds, ChromeX resolves the new item's physical
- * path, removes only the old sibling target through root, then lets Chromium's own
- * renameDownloadUri() move the new file and update MediaStore consistently.</p>
+ * path, asks ChromeX's own process to remove only the old sibling target through root, then lets
+ * Chromium's own renameDownloadUri() move the new file and update MediaStore consistently.</p>
  *
- * <p>The old target is never removed before the replacement download has fully published.</p>
+ * <p>The root operation intentionally runs through RootBridgeProvider. KernelSU's su visibility is
+ * available to ChromeX itself but not necessarily to the hooked Chrome process.</p>
  */
 final class DownloadCollectionConflictHooks {
     private static final String BRIDGE =
             "org.chromium.components.download.DownloadCollectionBridge";
-
-    private static final String[] SU_CANDIDATES = {
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/sbin/su",
-            "/debug_ramdisk/su",
-            "/data/adb/ksu/bin/su"
-    };
+    private static final Uri ROOT_BRIDGE_URI =
+            Uri.parse("content://" + RootBridgeProvider.AUTHORITY);
 
     /** intermediate/published content Uri -> originally requested display name. */
     private static final Map<String, String> REQUESTED_NAMES = new ConcurrentHashMap<>();
@@ -85,7 +77,6 @@ final class DownloadCollectionConflictHooks {
                 });
     }
 
-    /** Capture the requested name together with the concrete pending content Uri. */
     private void installIntermediateCapture() {
         hooks.all(runtime.classLoader, BRIDGE, "createIntermediateUriForPublish",
                 "chromex:download-collection:remember-pending-name", chain -> {
@@ -102,11 +93,6 @@ final class DownloadCollectionConflictHooks {
                 });
     }
 
-    /**
-     * Wait for a successful publish. The newly published item may physically be "name (1).ext".
-     * Free only the requested sibling path through root, then ask Chromium to rename the published
-     * Uri. This preserves MediaStore bookkeeping instead of root-moving the new file behind it.
-     */
     private void installPublishReplacement(Class<?> bridge) {
         hooks.all(runtime.classLoader, BRIDGE, "publishDownload",
                 "chromex:download-collection:replace-after-publish", chain -> {
@@ -134,6 +120,7 @@ final class DownloadCollectionConflictHooks {
                                 + " su=" + (root.suPath == null ? "<none>" : root.suPath)
                                 + " rootDeleted=" + root.deleted
                                 + " rootExit=" + root.exitCode
+                                + " rootReason=" + (root.reason == null ? "<none>" : root.reason)
                                 + " renamed=" + renamed
                                 + " staleRows=" + staleRows
                                 + " uri=" + published);
@@ -171,83 +158,49 @@ final class DownloadCollectionConflictHooks {
 
     private RootDeleteResult freeRequestedSibling(PhysicalItem physical, String requested) {
         if (physical.path == null || physical.path.isBlank()) {
-            return new RootDeleteResult(null, null, false, -2);
+            return new RootDeleteResult(null, null, false, -2, "physical-path-missing");
         }
-        String targetPath = null;
         try {
             File actual = new File(physical.path).getCanonicalFile();
             File parent = actual.getParentFile();
-            if (parent == null) return new RootDeleteResult(null, null, false, -3);
+            if (parent == null) {
+                return new RootDeleteResult(null, null, false, -3, "parent-missing");
+            }
             File target = new File(parent, requested).getCanonicalFile();
-            targetPath = target.getAbsolutePath();
+            String targetPath = target.getAbsolutePath();
             if (!parent.equals(target.getParentFile())) {
-                return new RootDeleteResult(targetPath, null, false, -4);
+                return new RootDeleteResult(targetPath, null, false, -4, "path-escape");
             }
             if (actual.equals(target)) {
-                // MediaProvider did not uniquify this download; never delete the just-published file.
-                return new RootDeleteResult(targetPath, null, false, 0);
+                return new RootDeleteResult(targetPath, null, false, 0, "already-target");
             }
 
-            String su = resolveSuExecutable();
-            if (su == null) {
-                hooks.warn("ChromeX root target cleanup failed: no su executable visible to Chrome process");
-                return new RootDeleteResult(targetPath, null, false, -7);
+            Bundle result = runtime.application.getContentResolver().call(
+                    ROOT_BRIDGE_URI,
+                    RootBridgeProvider.METHOD_DELETE_DOWNLOAD,
+                    requested,
+                    null);
+            if (result == null) {
+                return new RootDeleteResult(targetPath, null, false, -8, "bridge-null");
             }
-
-            String command = "rm -f -- " + shellQuote(targetPath);
-            Process process = new ProcessBuilder(su, "-c", command)
-                    .redirectErrorStream(true)
-                    .start();
-            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                return new RootDeleteResult(targetPath, su, false, -5);
-            }
-            int exit = process.exitValue();
-            boolean gone = !target.exists();
-            return new RootDeleteResult(targetPath, su, exit == 0 && gone, exit);
+            boolean success = result.getBoolean("success", false);
+            int exit = result.getInt("exit", success ? 0 : -9);
+            String su = result.getString("su");
+            String bridgeTarget = result.getString("target");
+            String reason = result.getString("reason");
+            return new RootDeleteResult(
+                    bridgeTarget == null ? targetPath : bridgeTarget,
+                    su,
+                    success,
+                    exit,
+                    reason);
         } catch (Throwable t) {
-            hooks.warn("ChromeX root target cleanup failed: " + t.getClass().getSimpleName()
+            hooks.warn("ChromeX root bridge cleanup failed: " + t.getClass().getSimpleName()
                     + ":" + (t.getMessage() == null ? "" : t.getMessage()));
-            return new RootDeleteResult(targetPath, null, false, -6);
+            return new RootDeleteResult(null, null, false, -6, t.getClass().getSimpleName());
         }
     }
 
-    private String resolveSuExecutable() {
-        for (String candidate : SU_CANDIDATES) {
-            try {
-                File file = new File(candidate);
-                if (file.isFile() && file.canExecute()) return candidate;
-            } catch (Throwable ignored) {}
-        }
-
-        // Last resort: ask Android's shell resolver through an absolute /system/bin/sh path.
-        try {
-            Process process = new ProcessBuilder("/system/bin/sh", "-c", "command -v su")
-                    .redirectErrorStream(true)
-                    .start();
-            boolean finished = process.waitFor(2, TimeUnit.SECONDS);
-            if (finished && process.exitValue() == 0) {
-                String resolved = readProcessOutput(process.getInputStream()).trim();
-                if (!resolved.isBlank()) return resolved;
-            } else if (!finished) {
-                process.destroyForcibly();
-            }
-        } catch (Throwable ignored) {}
-        return null;
-    }
-
-    private static String readProcessOutput(InputStream input) throws Exception {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[1024];
-        int read;
-        while ((read = input.read(buffer)) != -1) {
-            output.write(buffer, 0, read);
-        }
-        return output.toString(StandardCharsets.UTF_8.name());
-    }
-
-    /** Best-effort cleanup for stale MediaStore rows after the physical replacement succeeds. */
     private int deletePreviousExactName(String displayName, String keepUri) {
         ContentResolver resolver = runtime.application.getContentResolver();
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
@@ -313,10 +266,6 @@ final class DownloadCollectionConflictHooks {
         return value == null || value.isBlank() ? null : value;
     }
 
-    private static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
-
     private static boolean sameUri(String a, String b) {
         if (a == null || b == null) return false;
         if (a.equals(b)) return true;
@@ -341,12 +290,14 @@ final class DownloadCollectionConflictHooks {
         final String suPath;
         final boolean deleted;
         final int exitCode;
+        final String reason;
 
-        RootDeleteResult(String target, String suPath, boolean deleted, int exitCode) {
+        RootDeleteResult(String target, String suPath, boolean deleted, int exitCode, String reason) {
             this.target = target;
             this.suPath = suPath;
             this.deleted = deleted;
             this.exitCode = exitCode;
+            this.reason = reason;
         }
     }
 }
