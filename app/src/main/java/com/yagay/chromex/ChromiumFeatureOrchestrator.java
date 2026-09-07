@@ -31,15 +31,19 @@ final class ChromiumFeatureOrchestrator {
     }
 
     /**
-     * ChromeX now owns Chromium's Java -> Android DownloadManager enqueue boundary directly.
+     * Standard Chrome downloads are native DownloadItems, so replacing only
+     * DownloadManagerBridge.enqueueNewDownload does not affect the main download path.
      *
-     * <p>The former duplicate-dialog/completion-normalization/history-dedupe chain is intentionally
-     * not installed here. The replacement bridge receives Chrome's final URL, cookie, referrer,
-     * user-agent and filename request and performs the enqueue itself, making exact-name behavior
-     * independent from DuplicateDownloadDialogBridge and post-completion filename repair.</p>
+     * <p>ChromeX now hooks DownloadManagerService.onDownloadItemCreated(), cancels the just-created
+     * native DownloadItem through Chrome's own cancelDownload JNI path, suppresses publishing that
+     * cancelled item to the Java UI, and re-enqueues the GET request through Android
+     * DownloadManager. The older DownloadManagerBridge hook remains installed only as a fallback for
+     * the subset of downloads Chromium explicitly delegates to Android DownloadManager.</p>
      */
     private void installReplacementDownloader() {
-        install("ChromeX replacement downloader", () ->
+        install("ChromeX native download takeover", () ->
+                new ChromeXNativeDownloadTakeover(runtime, hooks, prefs).install());
+        install("ChromeX Android download bridge fallback", () ->
                 new ChromeXDownloadManagerBridge(runtime, hooks, prefs).install());
     }
 
