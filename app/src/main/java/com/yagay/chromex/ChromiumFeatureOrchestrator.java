@@ -23,8 +23,7 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installSameNameOverwriteFromEceff5b();
-        installDownloadListController();
+        installReplacementDownloader();
         installTabs();
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
@@ -32,38 +31,16 @@ final class ChromiumFeatureOrchestrator {
     }
 
     /**
-     * Same-name overwrite implementation restored from eceff5b20cb75749f8efdf8de9a327602dd263e3.
-     * Adaptive Chromium installs its OfflineItem capture first, then consumes the duplicate dialog.
-     * Verified Chrome builds use the same completion-after-download model, but read DownloadInfo
-     * through the shared semantic accessor so R8-renamed fields do not break normalization.
+     * ChromeX now owns Chromium's Java -> Android DownloadManager enqueue boundary directly.
+     *
+     * <p>The former duplicate-dialog/completion-normalization/history-dedupe chain is intentionally
+     * not installed here. The replacement bridge receives Chrome's final URL, cookie, referrer,
+     * user-agent and filename request and performs the enqueue itself, making exact-name behavior
+     * independent from DuplicateDownloadDialogBridge and post-completion filename repair.</p>
      */
-    private void installSameNameOverwriteFromEceff5b() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_DUPLICATE_CONFLICT, 60)
-                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 60)
-                || !capabilities.has(BrowserCapabilities.Key.DOWNLOAD_COMPLETION, 60)) {
-            skip("same-name overwrite", "duplicate/info/completion capability incomplete");
-            return;
-        }
-        install("same-name overwrite (eceff5b)", () -> {
-            if (profile.isAdaptive()) {
-                new AdaptiveOfflineItemDisplayHooks(runtime, hooks, prefs).install();
-                new AdaptiveSameNameOverwriteHooks(runtime, hooks, prefs).install();
-            } else {
-                new SameNameOverwriteHooks(profile, runtime, hooks, prefs).install();
-            }
-        });
-    }
-
-    /** Chrome keeps its native download UI, but ChromeX is the single owner of visible list data. */
-    private void installDownloadListController() {
-        if (!capabilities.has(BrowserCapabilities.Key.DOWNLOAD_INFO, 70)) {
-            skip("download list controller", "DownloadInfo unavailable");
-            return;
-        }
-        install("download backend refresh", () ->
-                new DownloadBackendRefreshBinding(runtime, hooks).install());
-        install("download list controller", () ->
-                new ChromeDownloadListController(profile, runtime, hooks, prefs).install());
+    private void installReplacementDownloader() {
+        install("ChromeX replacement downloader", () ->
+                new ChromeXDownloadManagerBridge(runtime, hooks, prefs).install());
     }
 
     private void installTabs() {
