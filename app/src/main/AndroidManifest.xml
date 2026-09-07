@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
         <package android:name="com.android.chrome" />
@@ -26,6 +29,11 @@
             android:authorities="com.yagay.chromex.diagnostics"
             android:exported="true"
             android:grantUriPermissions="true" />
+
+        <service
+            android:name=".ChromeXDownloadService"
+            android:exported="true"
+            android:foregroundServiceType="dataSync" />
 
         <activity
             android:name=".MainActivity"
