@@ -21,15 +21,29 @@ jobs:
         run: ./gradlew :app:testDebugUnitTest --stacktrace
       - name: Android lint
         run: ./gradlew :app:lintDebug --stacktrace
-      - name: Build debug APK
+      - name: Build arm64-v8a debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
       - name: Validate minified release
         run: ./gradlew :app:assembleRelease --stacktrace
+      - name: Prepare fixed debug APK name
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          test -n "$APK"
+          ABIS="$(unzip -Z1 "$APK" | sed -n 's#^lib/\([^/]*\)/.*#\1#p' | sort -u)"
+          if [ -n "$ABIS" ] && [ "$ABIS" != "arm64-v8a" ]; then
+            echo "Unexpected ABIs in APK: $ABIS"
+            exit 1
+          fi
+          cp "$APK" artifacts/ChromeX-debug-arm64-v8a.apk
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ChromeX-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: ChromeX-debug-arm64-v8a
+          path: artifacts/ChromeX-debug-arm64-v8a.apk
+          if-no-files-found: error
       - name: Upload unsigned release APK
         uses: actions/upload-artifact@v4
         with:
