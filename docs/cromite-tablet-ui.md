@@ -59,3 +59,32 @@ Cromite 的补丁修改 **35 个文件**，包括 `res/values/dimens.xml`,
 - 后续若需要在此 APK 上实现平板 UI，需要对照**真实安装 APK**的
   minified DEX、资源表以及 native Compositor，再设计受限 Hook。
 
+
+## V2 Chromium 158 source-anchored probe
+
+Chromium `158.0.8109.0` (closest available public Git tag) confirms:
+
+- `ChromeTabbedActivity.setupCompositorContent` uses `isTablet()` to choose between
+  `LayoutManagerChromePhone` and `LayoutManagerChromeTablet`.
+- `TopToolbarCoordinator.maybeInitializeTabStripTransitionCoordinator` exits early
+  if `ToolbarLayout.getTabStripHeightFromResource()` returns 0.
+- `HeightTransitionHandler` has a 412dp width threshold but still depends
+  on an initial nonzero strip height.
+- Phone resources define `tab_strip_height=0dp` while sw600dp defines 40dp.
+- `StripLayoutHelperManager` and `TabStripTopControlLayer` independently
+  consume strip height; adjusting only one creates inconsistent compositor state.
+
+**This commit removes all previous write-side tablet hooks from the active
+Chromium 158 pathway.** The switch now launches a bounded background DexKit
+scan of four known Chromium 158 TraceEvent literals and records the actual
+obfuscated owner/method along with resource values and DeviceFormFactor
+method signatures in ChromeX's existing exported diagnostics.
+
+Until the resulting actual APK symbol mapping is validated, automatic activation
+is intentionally disabled. Installing a compiling module does NOT imply
+that the desktop tab strip is visible.
+
+Source links:
+- https://github.com/chromium/chromium/blob/158.0.8109.0/chrome/android/java/src/org/chromium/chrome/browser/ChromeTabbedActivity.java
+- https://github.com/chromium/chromium/blob/158.0.8109.0/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/top/TopToolbarCoordinator.java
+- https://github.com/chromium/chromium/blob/158.0.8109.0/chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/StripLayoutHelperManager.java
