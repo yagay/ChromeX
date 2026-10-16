@@ -94,8 +94,10 @@ final class CromiteTabletUiHooks {
         if (type == null) return;
         // On phones the original resource-backed strip height is 0. Cromite initializes
         // mScrollableStripHeight from a 40dp replacement resource, irrespective of -sw600dp.
+        int index = 0;
         for (Constructor<?> ctor : type.getDeclaredConstructors()) {
-            hooks.constructor(ctor, PREFIX + "strip-ctor-" + ctor.getParameterCount(), chain -> {
+            final int slot = index++;
+            hooks.constructor(ctor, PREFIX + "strip-ctor-" + slot, chain -> {
                 Object value = chain.proceed();
                 Object target = chain.getThisObject();
                 if (target != null) {
@@ -109,8 +111,10 @@ final class CromiteTabletUiHooks {
     private void installReservedTopPadding() {
         Class<?> type = find("org.chromium.chrome.browser.toolbar.top.tab_strip.TabStripTransitionCoordinator");
         if (type == null) return;
+        int index = 0;
         for (Constructor<?> ctor : type.getDeclaredConstructors()) {
-            hooks.constructor(ctor, PREFIX + "transition-ctor-" + ctor.getParameterCount(),
+            final int slot = index++;
+            hooks.constructor(ctor, PREFIX + "transition-ctor-" + slot,
                     chain -> {
                         Object value = chain.proceed();
                         Object target = chain.getThisObject();

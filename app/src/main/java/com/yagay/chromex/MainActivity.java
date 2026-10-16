@@ -169,7 +169,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
 
         TextView help = new TextView(this);
         help.setText("参考 Cromite 的 Force Tablet UI 源码。仅在目标 Chromium 浏览器内部"
-                + " Hook 原生平板模式与 Tab Strip，不会另外绘制标签栏。\\n"
+                + " Hook 原生平板模式与 Tab Strip，不会另外绘制标签栏。\n"
                 + "默认关闭；启用或关闭后需要完全结束并重启目标浏览器。"
                 + "具体效果依赖浏览器 APK 内置的平板布局资源。"
                 + "若标签栏缺失或遮挡网页，请关闭此选项并导出 ChromeX 诊断日志。");
