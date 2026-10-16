@@ -2,7 +2,7 @@ name: Android Build
 
 on:
   push:
-    branches: [ main, plus ]
+    branches: [ main, plus, 'feature/cromite-tablet-ui' ]
   workflow_dispatch:
 
 jobs:

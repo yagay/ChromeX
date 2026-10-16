@@ -14,6 +14,7 @@ import io.github.libxposed.service.XposedService;
 public final class Config {
     public static final String FILE = "chromex";
 
+    public static final String FORCE_TABLET_UI = "force_tablet_ui";
     public static final String CLEAN_START = "clean_start";
     public static final String NEWTAB_HOME = "newtab_home";
     public static final String CLEAR_CLOSED_TABS = "clear_closed_tabs";
@@ -145,7 +146,8 @@ public final class Config {
     public static boolean defaultValue(String key) {
         // Safety-sensitive actions and every automatic file launch are explicit opt-in on a fresh
         // install. Existing APK users keep their old value because AUTO_OPEN_APK reuses that key.
-        if (BYPASS_DANGEROUS.equals(key)
+        if (FORCE_TABLET_UI.equals(key)
+                || BYPASS_DANGEROUS.equals(key)
                 || BYPASS_INSECURE.equals(key)
                 || BYPASS_POLICY.equals(key)
                 || BYPASS_OPEN.equals(key)

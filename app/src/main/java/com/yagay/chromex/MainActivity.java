@@ -138,6 +138,7 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         status.setText("已连接 · API " + value.getApiVersion()
                 + " · 当前作用域 " + scope + "\n");
         for (String[] item : ITEMS) addSwitch(item[0], item[1]);
+        addTabletModeSection();
         addBrowserScopeSection(scope);
         addAutoOpenSection();
         addDiagnosticsSection();
@@ -156,6 +157,26 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         content.addView(sw, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return sw;
+    }
+
+    private void addTabletModeSection() {
+        TextView heading = new TextView(this);
+        heading.setText("Chromium 原生平板标签栏 · 实验性");
+        heading.setTextSize(20f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setPadding(0, dp(20), 0, dp(4));
+        content.addView(heading);
+
+        TextView help = new TextView(this);
+        help.setText("参考 Cromite 的 Force Tablet UI 源码。仅在目标 Chromium 浏览器内部"
+                + " Hook 原生平板模式与 Tab Strip，不会另外绘制标签栏。\\n"
+                + "默认关闭；启用或关闭后需要完全结束并重启目标浏览器。"
+                + "具体效果依赖浏览器 APK 内置的平板布局资源。"
+                + "若标签栏缺失或遮挡网页，请关闭此选项并导出 ChromeX 诊断日志。");
+        help.setTextSize(14f);
+        help.setPadding(0, 0, 0, dp(6));
+        content.addView(help);
+        addSwitch(Config.FORCE_TABLET_UI, "强制原生平板标签栏（需重启浏览器）");
     }
 
     private void addBrowserScopeSection(List<String> currentScope) {

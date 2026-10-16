@@ -3,6 +3,7 @@ package com.yagay.chromex;
 import android.content.SharedPreferences;
 import android.util.Log;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.List;
@@ -62,6 +63,23 @@ final class HookSupport {
         } catch (Throwable t) {
             RuntimeDiagnostics.hookFailed(id, String.valueOf(method), t);
             error("hook method " + method, t);
+        }
+    }
+
+    void constructor(Constructor<?> constructor, String id, Interceptor interceptor) {
+        try {
+            module.hook(constructor)
+                    .setId(id)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(chain -> {
+                        RuntimeDiagnostics.hit(id);
+                        return interceptor.intercept(chain);
+                    });
+            RuntimeDiagnostics.event("INFO", "HOOK OK " + id
+                    + " -> " + constructor.getDeclaringClass().getName() + "#<init>");
+        } catch (Throwable t) {
+            RuntimeDiagnostics.hookFailed(id, constructor.toString(), t);
+            error("hook constructor " + constructor, t);
         }
     }
 
