@@ -40,20 +40,69 @@ final class CromiteTabletUiHooks {
                     + " (split dex/obfuscation may differ)");
             return;
         }
-        int base = installFormFactor(formFactor);
-        if (base == 0) {
-            hooks.warn("tablet-ui: no compatible DeviceFormFactor methods; feature inactive");
+        // Fail closed: never force the global tablet flag on a phone until ALL companion
+        // Chromium Java hooks AND physical packaged resources have been verified.
+        // Chromium 158 ChromePublic exposes isTablet() but obfuscates the strip classes,
+        // while its phone resource qualifier resolves tab_strip_height to 0dp.
+        // Enabling isTablet() alone causes a Java/JNI crash during ChromeTabbedActivity init.
+        java.util.List<String> blockers = CromiteTabletUiSafety.blockers(
+                new CromiteTabletUiSafety.Probe() {
+                    @Override
+                    public boolean hasClass(String className) {
+                        try {
+                            Class.forName(className, false, runtime.classLoader);
+                            return true;
+                        } catch (ClassNotFoundException | LinkageError e) {
+                            return false;
+                        }
+                    }
+
+                    @Override
+                    public boolean hasMethod(String className, String methodName,
+                                             Class<?> returnType, int parameterCount) {
+                        try {
+                            Class<?> type = Class.forName(className, false, runtime.classLoader);
+                            for (Method method : type.getDeclaredMethods()) {
+                                if (matches(method, methodName, returnType, parameterCount)) {
+                                    return true;
+                                }
+                            }
+                        } catch (ClassNotFoundException | LinkageError | SecurityException e) {
+                            return false;
+                        }
+                        return false;
+                    }
+
+                    @Override
+                    public int dimensionPx(String name) {
+                        Resources resources = runtime.application.getResources();
+                        int id = resourceId(resources, name, "dimen");
+                        if (id == 0) return 0;
+                        try {
+                            return resources.getDimensionPixelSize(id);
+                        } catch (Resources.NotFoundException e) {
+                            return 0;
+                        }
+                    }
+                });
+        if (!blockers.isEmpty()) {
+            hooks.warn("tablet-ui: INCOMPATIBLE layout, entire mode skipped safely; "
+                    + "global DeviceFormFactor.isTablet NOT hooked. Missing: "
+                    + String.join(", ", blockers));
             return;
         }
+
+        // Only after the preflight succeeds may the global tablet-identity methods be
+        // replaced. A preflight failure MUST leave the browser completely unchanged.
         installThreshold();
         installStripHeight();
         installStripLayoutInitialization();
         installReservedTopPadding();
         installToolbarPlacement();
         installFindToolbarFallback();
-        hooks.info("tablet-ui: installed Chromium source-compatible hooks, coreMethods=" + base
-                + "; NOT YET VERIFIED that target APK supplies the tablet layout and native strip."
-                + " Cromite also changes XML resources and compositor positioning.");
+        int base = installFormFactor(formFactor);
+        hooks.info("tablet-ui: installed after structural and resource preflight, coreMethods="
+                + base + "; runtime compositor behavior still requires device validation.");
     }
 
     private int installFormFactor(Class<?> type) {

@@ -39,3 +39,23 @@ Cromite 的补丁修改 **35 个文件**，包括 `res/values/dimens.xml`,
 目标优先为官方 Chromium (`org.chromium.chrome`)。其他 Chromium 衍生浏览器
 虽然也在 ChromeX 可选作用域中，但本功能依赖未混淆的 Chromium 源码类，
 并不承诺跨厂商有效。
+
+## Chromium 158 崩溃复现与防护（2026-10-16）
+
+来自用户诊断包：`org.chromium.chrome` 158.0.8110.0、ChromeX 1.1.409。
+旧实现仅成功 Hook `DeviceFormFactor#isTablet`，另外 5 个平板检测方法和
+`HeightTransitionHandler`、`ToolbarLayout`、`StripLayoutHelperManager`
+等核心类均未找到。日志随后出现 `Invalid resource ID 0x00000000`、
+`Crashing due to uncaught Java exception`、`FATAL EXCEPTION: main`。
+记录未包含最深层 Java 原始异常，故属于强关联原因而非已证明的唯一根因。
+
+修复策略：
+- 任何 Java 源码锚点、原生标签栏配套类或已打包手机尺寸资源缺失时，
+  完整跳过 Force Tablet UI，**不安装 isTablet() Hook**。
+- 严禁仅使用单独的 `isTablet() = true` 作为降级方案。
+- 显示明确的 `tablet-ui: INCOMPATIBLE layout` 诊断，而非提示成功。
+- Chromium 158 在无额外资源适配的情况下将保持原始手机界面，
+  这是刻意的安全回退，并非已完成桌面标签功能。
+- 后续若需要在此 APK 上实现平板 UI，需要对照**真实安装 APK**的
+  minified DEX、资源表以及 native Compositor，再设计受限 Hook。
+
