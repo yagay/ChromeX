@@ -24,7 +24,6 @@ final class ChromiumFeatureOrchestrator {
     }
 
     void install() {
-        installTabletUi();
         installDownloadSourceBindings();
         installSameNameOverwrite();
         installDownloadHistory();
@@ -32,12 +31,6 @@ final class ChromiumFeatureOrchestrator {
         installDownloads();
         hooks.info("capability-driven feature plan installed: package=" + runtime.packageName
                 + " profile=" + profile.label());
-    }
-
-    private void installTabletUi() {
-        if (!Config.get(prefs, Config.FORCE_TABLET_UI)) return;
-        install("Cromite tablet UI", () ->
-                new CromiteTabletUiHooks(runtime, hooks).install());
     }
 
     private void installDownloadSourceBindings() {

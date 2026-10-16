@@ -49,6 +49,12 @@ public final class ModuleMain extends XposedModule {
 
     private void installForRuntime(ChromeRuntime runtime) {
         RuntimeDiagnostics.flushPendingIfPossible();
+        // Tablet form-factor decisions are made while Chromium inflates its first Activity.
+        // Install these opt-in hooks BEFORE DexKit capability scans and feature resolution.
+        if (Config.get(prefs, Config.FORCE_TABLET_UI)) {
+            installFeature("Cromite tablet UI", () ->
+                    new CromiteTabletUiHooks(runtime, hooks).install());
+        }
         ChromiumProfile profile = ChromiumProfile.resolve(runtime, hooks);
         if (profile == null) {
             hooks.warn("No Chromium engine profile for " + targetPackage
