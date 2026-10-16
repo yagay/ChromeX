@@ -1,6 +1,9 @@
 package com.yagay.chromex;
 
 import android.content.res.Resources;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewStub;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -32,6 +35,10 @@ final class Chromium158TabletProbe {
     }
 
     void startAsync() {
+        // Critical source-derived methods are known from the real Chromium 158.0.8110.0
+        // diagnostic (23:07). Install read-only taps synchronously: these methods can run
+        // before an asynchronous DexKit scan finishes.
+        installLiveLayoutObservers();
         if (!RUNNING.compareAndSet(false, true)) return;
         Thread worker = new Thread(() -> {
             try {
@@ -45,6 +52,107 @@ final class Chromium158TabletProbe {
         }, "ChromeX-Tablet158-Scan");
         worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
+    }
+
+    private static final AtomicBoolean OBSERVERS_ATTEMPTED = new AtomicBoolean();
+
+    private void installLiveLayoutObservers() {
+        if (!OBSERVERS_ATTEMPTED.compareAndSet(false, true)) return;
+        try {
+            Class<?> activity = Class.forName(
+                    "org.chromium.chrome.browser.ChromeTabbedActivity", false,
+                    runtime.classLoader);
+            for (String[] target : new String[][]{
+                    {"i3", "TABLET"}, {"h3", "PHONE"}, {"T3", "COMPOSITOR"}}) {
+                Method method;
+                try {
+                    method = activity.getDeclaredMethod(target[0]);
+                } catch (NoSuchMethodException e) {
+                    hooks.warn(PREFIX + "LIVE " + target[1] + " method unavailable");
+                    continue;
+                }
+                if ("COMPOSITOR".equals(target[1]) && method.getReturnType() != void.class) {
+                    hooks.warn(PREFIX + "LIVE unexpected compositor return type");
+                    continue;
+                }
+                if (!"COMPOSITOR".equals(target[1]) && method.getReturnType() == void.class) {
+                    hooks.warn(PREFIX + "LIVE unexpected layout factory return type");
+                    continue;
+                }
+                final String meaning = target[1];
+                hooks.method(method, "chromex:tablet158:observe:" + meaning,
+                        chain -> {
+                            Object result = chain.proceed();
+                            String output = result == null ? "null"
+                                    : result.getClass().getName();
+                            hooks.info(PREFIX + "LIVE " + meaning + " invoked; return=" + output);
+                            return result;
+                        });
+            }
+            Class<?> control = Class.forName(
+                    "org.chromium.chrome.browser.toolbar.top.ToolbarControlContainer", false,
+                    runtime.classLoader);
+            Method init = control.getDeclaredMethod("q", int.class, int.class);
+            if (init.getReturnType() != void.class) {
+                hooks.warn(PREFIX + "LIVE toolbar init return type mismatch");
+                return;
+            }
+            hooks.method(init, "chromex:tablet158:observe:toolbar-init", chain -> {
+                int layoutId = ((Number) chain.getArg(0)).intValue();
+                int heightResId = ((Number) chain.getArg(1)).intValue();
+                Object receiver = chain.getThisObject();
+                Resources res = receiver instanceof View
+                        ? ((View) receiver).getResources() : runtime.application.getResources();
+                hooks.info(PREFIX + "LIVE TOOLBAR BEFORE layout=" + resourceDescription(res, layoutId)
+                        + " height=" + resourceDescription(res, heightResId));
+                Object result = chain.proceed();
+                if (receiver instanceof ViewGroup) {
+                    describeToolbarChildren((ViewGroup) receiver, 0, 0);
+                }
+                return result;
+            });
+            hooks.info(PREFIX + "LIVE observers installed before startup; "
+                    + "they call Chromium originals unchanged");
+        } catch (Throwable error) {
+            hooks.warn(PREFIX + "LIVE observers incomplete: " + error.getClass().getSimpleName());
+        }
+    }
+
+    private String resourceDescription(Resources res, int id) {
+        if (id == 0) return "0";
+        StringBuilder b = new StringBuilder("0x").append(Integer.toHexString(id));
+        try {
+            b.append('(').append(res.getResourceName(id)).append(')');
+        } catch (Resources.NotFoundException ignored) {
+            b.append("(name-stripped)");
+        }
+        try {
+            if ("dimen".equals(res.getResourceTypeName(id))) {
+                b.append(":").append(res.getDimensionPixelSize(id)).append("px");
+            }
+        } catch (Resources.NotFoundException ignored) {}
+        return b.toString();
+    }
+
+    private void describeToolbarChildren(ViewGroup root, int depth, int count) {
+        if (depth > 2 || count > 20) return;
+        for (int i = 0; i < root.getChildCount() && i < 8; i++) {
+            View child = root.getChildAt(i);
+            if (child == null) continue;
+            if (child instanceof ViewStub) {
+                ViewStub stub = (ViewStub) child;
+                hooks.info(PREFIX + "LIVE VIEWSTUB class=" + stub.getClass().getName()
+                        + " layout=" + resourceDescription(stub.getResources(),
+                                stub.getLayoutResource()));
+            } else if (child.getClass().getName().contains("Toolbar")) {
+                hooks.info(PREFIX + "LIVE TOOLBAR VIEW class=" + child.getClass().getName()
+                        + " height=" + child.getHeight()
+                        + " measuredHeight=" + child.getMeasuredHeight());
+            }
+            if (child instanceof ViewGroup) {
+                describeToolbarChildren((ViewGroup) child, depth + 1, count + i + 1);
+            }
+        }
     }
 
     private void inspect() {

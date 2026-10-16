@@ -119,3 +119,28 @@ A user may explicitly turn safe mode off, but leaving the tablet scan
 enabled always enforces isolation. No other browser package is affected.
 Disable/enable settings and force-stop Chromium to restart the process
 rather than relying on hot reload.
+
+## 23:07 diagnostic and V3 observer
+
+The 23:07 ZIP confirms safe mode=true, scan=true and **4/4 DEX anchors matched**.
+The existing source scan is **read-only**, so no horizontal tabs are expected yet.
+Packaged resource names are stripped; `Resources.getIdentifier(...)` returned 0
+for layout names and dimensions, which does not establish missing resource IDs.
+
+V3 augments the 158-specific read-only probe with synchronous LSPosed
+observers for the four **actual** 158.0.8110.0 methods discovered in the ZIP:
+`ChromeTabbedActivity.i3()` (tablet manager),
+`ChromeTabbedActivity.h3()` (phone manager),
+`ChromeTabbedActivity.T3()` (compositor startup), and
+`ToolbarControlContainer.q(int,int)` (toolbar inflation).
+
+The observers run the original method with `chain.proceed()`, without
+altering arguments, results, resources, layout, or DeviceFormFactor.
+They log which native manager was actually constructed and the integer layout/
+height resource IDs as passed by Chromium. This yields the exact values needed
+to reason about safe tablet initialization instead of guessing numeric R IDs.
+Existing Chromium 158 safe isolation remains enabled.
+
+**No native tablet mode is enabled yet:** it cannot safely follow from a
+source-method mapping alone; the layout/resource/Compositor prerequisites
+must be identified and corrected together.
