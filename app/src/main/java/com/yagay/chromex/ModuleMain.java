@@ -55,6 +55,18 @@ public final class ModuleMain extends XposedModule {
             installFeature("Cromite tablet UI", () ->
                     new CromiteTabletUiHooks(runtime, hooks).install());
         }
+        // Isolation is deliberately before capability resolution, tab/homepage/download
+        // interceptors, extension probes and old deep diagnostics. This ensures source
+        // analysis is not mixed with other hooks when investigating Chromium 158 crashes.
+        if (Chromium158IsolationPolicy.shouldIsolate(
+                runtime.packageName, runtime.majorVersion,
+                Config.get(prefs, Config.CHROMIUM158_SAFE_MODE),
+                Config.get(prefs, Config.FORCE_TABLET_UI))) {
+            hooks.warn("Chromium 158 SAFE MODE: skipping all ChromeX feature hooks"
+                    + " (tabs/homepage/downloads/extensions). "
+                    + "Tablet source probe only if enabled. Other browsers unaffected.");
+            return;
+        }
         ChromiumProfile profile = ChromiumProfile.resolve(runtime, hooks);
         if (profile == null) {
             hooks.warn("No Chromium engine profile for " + targetPackage

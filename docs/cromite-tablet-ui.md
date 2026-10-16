@@ -88,3 +88,34 @@ Source links:
 - https://github.com/chromium/chromium/blob/158.0.8109.0/chrome/android/java/src/org/chromium/chrome/browser/ChromeTabbedActivity.java
 - https://github.com/chromium/chromium/blob/158.0.8109.0/chrome/browser/ui/android/toolbar/java/src/org/chromium/chrome/browser/toolbar/top/TopToolbarCoordinator.java
 - https://github.com/chromium/chromium/blob/158.0.8109.0/chrome/android/java/src/org/chromium/chrome/browser/compositor/overlays/strip/StripLayoutHelperManager.java
+
+## 2026-10-16 23:00 diagnostic: Chromium 158 safe isolation
+
+The user uploaded `ChromeX-diagnostic-20261016-230009.zip` with ChromeX
+1.1.413 (`d4a2cad8b473`), Chromium 158.0.8110.0 and the tablet scan enabled.
+
+The **read-only probe completed all four anchors**:
+
+- `createLayoutManagerForTablet` => `ChromeTabbedActivity#i3()` => `da8`
+- `createLayoutManagerForPhone` => `ChromeTabbedActivity#h3()` => `ba8`
+- `ToolbarControlContainer.initWithToolbar` => `ToolbarControlContainer#q(int,int)`
+- `setupCompositorContent` => `ChromeTabbedActivity#T3()`
+
+The report's filtered logcat begins at 22:59:53, after the last ChromeX
+module event at 22:59:51. The actual crash stack is **not present**.
+The probe made **no Hook installations** in the tablet subsystem,
+but the existing tabs, homepage, downloads and extension hooks were still
+installed and `chromex:universal:tabs:onStart` hit once.
+
+**Isolation change:** Stock `org.chromium.chrome` major 158 now defaults to
+safe mode, which skips the entire regular feature orchestrator,
+extension probing and deep scanning before they install hooks.
+If the tablet source scan is enabled, it runs on its own, with only the
+existing ChromeX bootstrap observer. The old tablet write Hooks remain
+disabled. This permits testing whether unrelated ChromeX hooks caused
+the crash, but does NOT prove the failure's root cause or activate tabs.
+
+A user may explicitly turn safe mode off, but leaving the tablet scan
+enabled always enforces isolation. No other browser package is affected.
+Disable/enable settings and force-stop Chromium to restart the process
+rather than relying on hot reload.

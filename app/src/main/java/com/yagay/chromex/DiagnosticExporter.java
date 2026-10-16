@@ -191,7 +191,7 @@ final class DiagnosticExporter {
 
     private static String settings(SharedPreferences settingsPrefs, SharedPreferences diagnosticPrefs) {
         String[] keys = {
-                Config.FORCE_TABLET_UI,
+                Config.FORCE_TABLET_UI, Config.CHROMIUM158_SAFE_MODE,
                 Config.CLEAN_START, Config.NEWTAB_HOME, Config.CLEAR_CLOSED_TABS,
                 Config.BYPASS_DANGEROUS, Config.BYPASS_INSECURE, Config.BYPASS_DUPLICATE,
                 Config.OVERWRITE_DUPLICATE, Config.BYPASS_POLICY, Config.BYPASS_LOCATION,

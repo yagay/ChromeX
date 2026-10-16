@@ -170,13 +170,17 @@ public final class MainActivity extends Activity implements ChromeXApp.Listener 
         TextView help = new TextView(this);
         help.setText("参考 Cromite 的 Force Tablet UI 源码。仅在目标 Chromium 浏览器内部"
                 + " Hook 原生平板模式与 Tab Strip，不会另外绘制标签栏。\n"
-                + "当前为 Chromium 158 源码匹配诊断阶段，不修改平板布局；"
+                + "Chromium 158 安全模式默认开启，暂时停用其标签、下载及扩展 Hook；"
+                + "当前只做源码匹配诊断，不修改平板布局；"
                 + "启用后重新启动 Chromium，并从 ChromeX 导出诊断包。"
                 + "匹配结果用于定位实际混淆方法，避免再次闪退。");
         help.setTextSize(14f);
         help.setPadding(0, 0, 0, dp(6));
         content.addView(help);
-        addSwitch(Config.FORCE_TABLET_UI, "扫描 Chromium 158 原生标签栏（需重启浏览器）");
+        addSwitch(Config.CHROMIUM158_SAFE_MODE,
+                "Chromium 158 安全模式（暂停其他 Hook）");
+        addSwitch(Config.FORCE_TABLET_UI,
+                "扫描 Chromium 158 原生标签栏（需重启浏览器）");
     }
 
     private void addBrowserScopeSection(List<String> currentScope) {
